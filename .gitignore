@@ -1,0 +1,24 @@
+.idea/
+.DS_Store
+
+# Secrets and generated env
+.env
+export-secrets.sh
+
+# Terraform state and providers
+terraform/terraform.tfstate
+terraform/terraform.tfstate.backup
+terraform/.terraform/
+
+# Generated deck merge output
+deck/kong-api.yaml
+deck/kong-llm.yaml
+deck/kong-mcp.yaml
+
+# TLS — root CA cert is committed, private keys are not
+tls/dp-api.crt
+tls/dp-api.key
+tls/dp-llm.crt
+tls/dp-llm.key
+tls/dp-mcp.crt
+tls/dp-mcp.key

@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-dice-roller
+  namespace: mcp-dice-roller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-dice-roller
+  template:
+    metadata:
+      labels:
+        app: mcp-dice-roller
+    spec:
+      containers:
+        - name: mcp-dice-roller
+          image: mcp-dice-roller:latest
+          imagePullPolicy: Never
+          env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-lgtm.otel-lgtm.svc.cluster.local:4318
+            - name: OTEL_SERVICE_NAME
+              value: mcp-dice-roller
+            - name: OTEL_ENVIRONMENT
+              value: lab
+            - name: OTEL_LOGS_ENABLED
+              value: "true"
+            - name: OTEL_TRACES_ENABLED
+              value: "false"
+            - name: OTEL_PROPAGATION_ENABLED
+              value: "true"
+            - name: OTEL_METRICS_ENABLED
+              value: "true"
+          ports:
+            - containerPort: 8000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-dice-roller
+  namespace: mcp-dice-roller
+spec:
+  selector:
+    app: mcp-dice-roller
+  ports:
+    - name: mcp
+      port: 8000
+      targetPort: 8000
+      appProtocol: agentgateway.dev/mcp

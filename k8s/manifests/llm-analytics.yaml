@@ -1,0 +1,148 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-analytics-config
+  namespace: llm-analytics
+data:
+  KAFKA_BOOTSTRAP: "kafka.kafka.svc.cluster.local:9092"
+  KAFKA_TOPIC: "llm-usage"
+  POSTGRES_DSN: "postgresql://postgres:postgres@postgres.llm-analytics.svc.cluster.local:5432/llm_analytics"
+  EMBEDDING_MODEL: "sentence-transformers/all-MiniLM-L6-v2"
+  MIN_CLUSTER_REQUESTS: "3"
+  MIN_CLUSTER_TOKENS: "500"
+  DBSCAN_EPS: "0.18"
+  SIMPLE_PROMPT_TOKEN_THRESHOLD: "200"
+  HIGH_CONSUMER_TOKEN_SHARE: "0.4"
+  MIN_CONSUMER_TOKENS: "5000"
+  MIN_COMMON_PREFIX: "50"
+  MIN_CONSUMER_REQUESTS: "5"
+  LOOKBACK_INTERVAL: "1 hour"
+  COMPRESSOR_TOKEN_THRESHOLD: "800"
+  MIN_PII_RATE: "0.1"
+  MIN_TEMPLATE_CHARS: "30"
+---
+# Ingestor — Kafka consumer → Postgres with embeddings
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-ingestor
+  namespace: llm-analytics
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llm-ingestor
+  template:
+    metadata:
+      labels:
+        app: llm-ingestor
+    spec:
+      containers:
+        - name: llm-ingestor
+          image: llm-ingestor:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: llm-analytics-config
+---
+# Analyzer — CronJob: cluster prompts + generate recommendations
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: llm-analyzer
+  namespace: llm-analytics
+spec:
+  schedule: "*/5 * * * *"
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: llm-analyzer
+              image: llm-analyzer:latest
+              imagePullPolicy: IfNotPresent
+              envFrom:
+                - configMapRef:
+                    name: llm-analytics-config
+---
+# API — FastAPI exposing recommendations
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-analytics-api
+  namespace: llm-analytics
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llm-analytics-api
+  template:
+    metadata:
+      labels:
+        app: llm-analytics-api
+    spec:
+      containers:
+        - name: llm-analytics-api
+          image: llm-analytics-api:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: llm-analytics-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-analytics-api
+  namespace: llm-analytics
+  annotations:
+    metallb.universe.tf/loadBalancerIPs: "172.18.255.207"
+spec:
+  type: LoadBalancer
+  selector:
+    app: llm-analytics-api
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+# UI — React dashboard
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-analytics-ui
+  namespace: llm-analytics
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llm-analytics-ui
+  template:
+    metadata:
+      labels:
+        app: llm-analytics-ui
+    spec:
+      containers:
+        - name: llm-analytics-ui
+          image: llm-analytics-ui:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-analytics-ui
+  namespace: llm-analytics
+  annotations:
+    metallb.universe.tf/loadBalancerIPs: "172.18.255.206"
+spec:
+  type: LoadBalancer
+  selector:
+    app: llm-analytics-ui
+  ports:
+    - port: 80
+      targetPort: 80

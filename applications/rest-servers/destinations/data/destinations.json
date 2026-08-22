@@ -1,0 +1,268 @@
+{
+  "destinations": [
+    {
+      "id": "amsterdam",
+      "name": "Amsterdam",
+      "country": "Netherlands",
+      "region": "Europe",
+      "vibes": ["city", "culture", "food", "design"],
+      "budget_level": "high",
+      "airport_iata_codes": ["AMS"],
+      "activities": ["museums", "canals", "cycling", "coffee", "walkable"],
+      "blurb": "Canals, museums, and great neighborhoods with a relaxed-but-buzzy pace."
+    },
+    {
+      "id": "eindhoven",
+      "name": "Eindhoven",
+      "country": "Netherlands",
+      "region": "Europe",
+      "vibes": ["city", "design", "food"],
+      "budget_level": "mid",
+      "airport_iata_codes": ["EIN"],
+      "activities": ["innovation", "modern", "tech", "beer"],
+      "blurb": "Modern design and innovation with an easy city-break vibe."
+    },
+    {
+      "id": "brussels",
+      "name": "Brussels",
+      "country": "Belgium",
+      "region": "Europe",
+      "vibes": ["city", "food", "culture"],
+      "budget_level": "mid",
+      "airport_iata_codes": ["BRU"],
+      "activities": ["beer", "chocolate", "architecture", "museums", "waffles"],
+      "blurb": "Grand squares, museums, and a food-and-beer-first itinerary."
+    },
+    {
+      "id": "paris",
+      "name": "Paris",
+      "country": "France",
+      "region": "Europe",
+      "vibes": ["city", "culture", "food"],
+      "budget_level": "high",
+      "airport_iata_codes": ["CDG", "ORY"],
+      "activities": ["art", "museums", "cafes", "architecture", "romantic"],
+      "blurb": "Iconic museums, food, and neighborhoods—best enjoyed with an energetic pace."
+    },
+    {
+      "id": "london",
+      "name": "London",
+      "country": "United Kingdom",
+      "region": "Europe",
+      "vibes": ["city", "culture", "food", "nightlife"],
+      "budget_level": "high",
+      "airport_iata_codes": ["LHR", "LGW", "STN", "LTN", "LCY", "SEN"],
+      "activities": ["theatre", "museums", "markets", "pubs", "shopping"],
+      "blurb": "Big-city variety: culture, neighborhoods, and nightlife with endless options."
+    },
+    {
+      "id": "dublin",
+      "name": "Dublin",
+      "country": "Ireland",
+      "region": "Europe",
+      "vibes": ["city", "nightlife", "culture", "food"],
+      "budget_level": "high",
+      "airport_iata_codes": ["DUB"],
+      "activities": ["pubs", "music", "literature", "walkable", "friendly"],
+      "blurb": "Music, pubs, and storytelling energy with an easy-to-navigate center."
+    },
+    {
+      "id": "barcelona",
+      "name": "Barcelona",
+      "country": "Spain",
+      "region": "Europe",
+      "vibes": ["beach", "city", "food", "culture", "nightlife"],
+      "budget_level": "mid",
+      "airport_iata_codes": ["BCN"],
+      "activities": ["architecture", "sea", "tapas", "gaudi", "shopping"],
+      "blurb": "Beach-meets-city: architecture, tapas, and nights out."
+    },
+    {
+      "id": "madrid",
+      "name": "Madrid",
+      "country": "Spain",
+      "region": "Europe",
+      "vibes": ["city", "food", "culture", "nightlife"],
+      "budget_level": "mid",
+      "airport_iata_codes": ["MAD"],
+      "activities": ["museums", "tapas", "parks", "late-nights"],
+      "blurb": "Late dinners, great museums, and a nightlife-forward rhythm."
+    },
+    {
+      "id": "lisbon",
+      "name": "Lisbon",
+      "country": "Portugal",
+      "region": "Europe",
+      "vibes": ["city", "food", "culture", "relax"],
+      "budget_level": "mid",
+      "airport_iata_codes": ["LIS"],
+      "activities": ["coffee", "trams", "viewpoints", "walkable", "daytrips"],
+      "blurb": "Hills, viewpoints, and slow-late mornings with excellent value."
+    },
+    {
+      "id": "rome",
+      "name": "Rome",
+      "country": "Italy",
+      "region": "Europe",
+      "vibes": ["city", "culture", "food"],
+      "budget_level": "mid",
+      "airport_iata_codes": ["FCO", "CIA"],
+      "activities": ["ancient-sites", "museums", "walking", "gelato"],
+      "blurb": "Big history days and long dinners—best if you like to roam."
+    },
+    {
+      "id": "milan",
+      "name": "Milan",
+      "country": "Italy",
+      "region": "Europe",
+      "vibes": ["city", "design", "food", "nightlife"],
+      "budget_level": "high",
+      "airport_iata_codes": ["MXP", "LIN", "BGY"],
+      "activities": ["fashion", "shopping", "art", "aperitivo", "business"],
+      "blurb": "Design, fashion, and aperitivo culture with a sleek, fast tempo."
+    },
+    {
+      "id": "berlin",
+      "name": "Berlin",
+      "country": "Germany",
+      "region": "Europe",
+      "vibes": ["city", "nightlife", "culture", "food"],
+      "budget_level": "mid",
+      "airport_iata_codes": ["BER"],
+      "activities": ["music", "art", "history", "creative", "street-food"],
+      "blurb": "Creative city energy with late nights and endless cultural detours."
+    },
+    {
+      "id": "frankfurt",
+      "name": "Frankfurt",
+      "country": "Germany",
+      "region": "Europe",
+      "vibes": ["city", "food", "culture"],
+      "budget_level": "high",
+      "airport_iata_codes": ["FRA"],
+      "activities": ["finance", "skyline", "museums", "riverwalks", "business"],
+      "blurb": "Compact and modern with museums and a surprisingly good food scene."
+    },
+    {
+      "id": "munich",
+      "name": "Munich",
+      "country": "Germany",
+      "region": "Europe",
+      "vibes": ["city", "culture", "food", "nature"],
+      "budget_level": "high",
+      "airport_iata_codes": ["MUC"],
+      "activities": ["beer-gardens", "parks", "daytrips", "tradition"],
+      "blurb": "Classic city culture plus easy nature day trips and beer-garden afternoons."
+    },
+    {
+      "id": "copenhagen",
+      "name": "Copenhagen",
+      "country": "Denmark",
+      "region": "Europe",
+      "vibes": ["city", "design", "food", "relax"],
+      "budget_level": "high",
+      "airport_iata_codes": ["CPH"],
+      "activities": ["cycling", "architecture", "waterfront", "coffee", "modern"],
+      "blurb": "Bike-first design city with great food and an easygoing flow."
+    },
+    {
+      "id": "stockholm",
+      "name": "Stockholm",
+      "country": "Sweden",
+      "region": "Europe",
+      "vibes": ["city", "nature", "design", "culture"],
+      "budget_level": "high",
+      "airport_iata_codes": ["ARN"],
+      "activities": ["islands", "water", "museums", "walking", "scenic"],
+      "blurb": "Island city with nature access and a crisp design-forward feel."
+    },
+    {
+      "id": "oslo",
+      "name": "Oslo",
+      "country": "Norway",
+      "region": "Europe",
+      "vibes": ["city", "nature", "relax", "culture"],
+      "budget_level": "high",
+      "airport_iata_codes": ["OSL"],
+      "activities": ["fjords", "hiking", "museums", "modern", "outdoors"],
+      "blurb": "A calm base for outdoor time—forests, water, and low-key city culture."
+    },
+    {
+      "id": "helsinki",
+      "name": "Helsinki",
+      "country": "Finland",
+      "region": "Europe",
+      "vibes": ["city", "design", "relax", "culture"],
+      "budget_level": "high",
+      "airport_iata_codes": ["HEL"],
+      "activities": ["sauna", "architecture", "water", "coffee", "slow-travel"],
+      "blurb": "Sauna-and-sea calm with strong design, coffee, and architecture."
+    },
+    {
+      "id": "vienna",
+      "name": "Vienna",
+      "country": "Austria",
+      "region": "Europe",
+      "vibes": ["city", "culture", "food", "relax"],
+      "budget_level": "mid",
+      "airport_iata_codes": ["VIE"],
+      "activities": ["cafes", "music", "museums", "walking", "elegant"],
+      "blurb": "Cafe culture, music, and museums—built for slow, elegant days."
+    },
+    {
+      "id": "zurich",
+      "name": "Zurich",
+      "country": "Switzerland",
+      "region": "Europe",
+      "vibes": ["city", "nature", "relax", "food"],
+      "budget_level": "high",
+      "airport_iata_codes": ["ZRH"],
+      "activities": ["lake", "mountains", "clean", "walking", "scenic"],
+      "blurb": "Polished lake city with quick access to mountains and calm itineraries."
+    },
+    {
+      "id": "geneva",
+      "name": "Geneva",
+      "country": "Switzerland",
+      "region": "Europe",
+      "vibes": ["city", "relax", "nature", "culture"],
+      "budget_level": "high",
+      "airport_iata_codes": ["GVA"],
+      "activities": ["lake", "mountains", "international", "walking", "quiet"],
+      "blurb": "Low-key and scenic: lake views, international vibe, and easy day trips."
+    },
+    {
+      "id": "prague",
+      "name": "Prague",
+      "country": "Czech Republic",
+      "region": "Europe",
+      "vibes": ["city", "culture", "food", "relax"],
+      "budget_level": "mid",
+      "airport_iata_codes": ["PRG"],
+      "activities": ["architecture", "old-town", "beer", "walking", "romantic"],
+      "blurb": "Fairytale streets, great value, and a slower, stroll-friendly rhythm."
+    },
+    {
+      "id": "warsaw",
+      "name": "Warsaw",
+      "country": "Poland",
+      "region": "Europe",
+      "vibes": ["city", "culture", "food"],
+      "budget_level": "mid",
+      "airport_iata_codes": ["WAW"],
+      "activities": ["history", "parks", "museums", "modern", "walkable"],
+      "blurb": "Modern energy with deep history, parks, and a strong food scene."
+    },
+    {
+      "id": "athens",
+      "name": "Athens",
+      "country": "Greece",
+      "region": "Europe",
+      "vibes": ["city", "culture", "food", "nightlife"],
+      "budget_level": "mid",
+      "airport_iata_codes": ["ATH"],
+      "activities": ["ancient-sites", "views", "markets", "daytrips", "late-nights"],
+      "blurb": "Ancient landmarks, vibrant neighborhoods, and a lively night culture."
+    }
+  ]
+}

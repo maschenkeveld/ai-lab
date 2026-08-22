@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-destinations
+  namespace: mcp-destinations
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-destinations
+  template:
+    metadata:
+      labels:
+        app: mcp-destinations
+    spec:
+      containers:
+        - name: mcp-destinations
+          image: mcp-destinations:latest
+          imagePullPolicy: Never
+          env:
+            - name: DESTINATIONS_BASE_URL
+              value: http://rest-destinations.rest-destinations.svc.cluster.local:8000
+            - name: HOST
+              value: 0.0.0.0
+            - name: PORT
+              value: "8000"
+            - name: MCP_PATH
+              value: /mcp
+          ports:
+            - containerPort: 8000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-destinations
+  namespace: mcp-destinations
+spec:
+  selector:
+    app: mcp-destinations
+  ports:
+    - name: mcp
+      port: 8000
+      targetPort: 8000
+      appProtocol: agentgateway.dev/mcp

@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: travel-destination-decision
+  namespace: travel-agency-langgraph
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: travel-destination-decision
+  template:
+    metadata:
+      labels:
+        app: travel-destination-decision
+    spec:
+      containers:
+        - name: travel-destination-decision
+          image: travel-destination-decision:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 4202
+          env:
+            - name: PORT
+              value: "4202"
+            - name: AGENT_NAME
+              value: travel-destination-decision
+            - name: PUBLIC_AGENT_BASE_URL
+              value: http://agentgateway.lab/a2a/destination-decision
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: travel-destination-decision
+  namespace: travel-agency-langgraph
+spec:
+  selector:
+    app: travel-destination-decision
+  ports:
+    - name: http
+      port: 4202
+      targetPort: 4202

@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: travel-flight-finder
+  namespace: travel-agency-langgraph
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: travel-flight-finder
+  template:
+    metadata:
+      labels:
+        app: travel-flight-finder
+    spec:
+      containers:
+        - name: travel-flight-finder
+          image: travel-flight-finder:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 4203
+          env:
+            - name: PORT
+              value: "4203"
+            - name: AGENT_NAME
+              value: travel-flight-finder
+            - name: PUBLIC_AGENT_BASE_URL
+              value: http://agentgateway.lab/a2a/flight-finder
+            - name: API_BASE_URL
+              value: http://traefik.traefik.svc.cluster.local
+            - name: API_HOST_HEADER
+              value: traefik-api-gw.lab
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: travel-flight-finder
+  namespace: travel-agency-langgraph
+spec:
+  selector:
+    app: travel-flight-finder
+  ports:
+    - name: http
+      port: 4203
+      targetPort: 4203

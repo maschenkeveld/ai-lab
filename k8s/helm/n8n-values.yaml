@@ -1,0 +1,21 @@
+encryptionKey: "YDmmoGAsXZxt7QnrwBVqZqlYXFWjYWR2"
+
+extraEnvVars:
+  N8N_SECURE_COOKIE: "false"
+
+service:
+  type: LoadBalancer
+  annotations:
+    metallb.universe.tf/loadBalancerIPs: "172.18.255.209"
+
+main:
+  persistence:
+    enabled: true
+    size: 1Gi
+    # Uses the default kind StorageClass (hostPath)
+
+db:
+  type: sqlite
+
+ingress:
+  enabled: false

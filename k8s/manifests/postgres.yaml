@@ -1,0 +1,143 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-schema
+  namespace: llm-analytics
+data:
+  01-schema.sql: |
+    CREATE EXTENSION IF NOT EXISTS vector;
+
+    CREATE TABLE IF NOT EXISTS llm_raw_logs (
+        id            BIGSERIAL PRIMARY KEY,
+        received_at   TIMESTAMPTZ DEFAULT now(),
+        kafka_topic   TEXT,
+        kafka_partition INT,
+        kafka_offset  BIGINT,
+        raw           JSONB NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS llm_requests (
+        id                 BIGSERIAL PRIMARY KEY,
+        received_at        TIMESTAMPTZ DEFAULT now(),
+        request_id         TEXT,
+        route_name         TEXT,
+        service_name       TEXT,
+        consumer_id        TEXT,
+        consumer_username  TEXT,
+        method             TEXT,
+        path               TEXT,
+        status_code        INT,
+        latency_ms         INT,
+        model              TEXT,
+        provider           TEXT,
+        prompt             TEXT,
+        prompt_tokens      INT DEFAULT 0,
+        completion_tokens  INT DEFAULT 0,
+        total_tokens       INT DEFAULT 0,
+        prompt_hash        TEXT,
+        prompt_embedding   vector(384),
+        raw_log_id         BIGINT REFERENCES llm_raw_logs(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_llm_requests_received_at  ON llm_requests (received_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_llm_requests_prompt_hash  ON llm_requests (prompt_hash);
+    CREATE INDEX IF NOT EXISTS idx_llm_requests_route_model  ON llm_requests (route_name, model);
+
+    CREATE TABLE IF NOT EXISTS prompt_clusters (
+        id                BIGSERIAL PRIMARY KEY,
+        created_at        TIMESTAMPTZ DEFAULT now(),
+        cluster_key       TEXT,
+        title             TEXT,
+        example_prompt    TEXT,
+        requests          INT,
+        total_tokens      BIGINT,
+        avg_latency_ms    FLOAT,
+        route_name        TEXT,
+        consumer_username TEXT,
+        model             TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS plugin_recommendations (
+        id                   BIGSERIAL PRIMARY KEY,
+        created_at           TIMESTAMPTZ DEFAULT now(),
+        cluster_id           BIGINT REFERENCES prompt_clusters(id),
+        recommendation_type  TEXT,
+        title                TEXT,
+        reason               TEXT,
+        confidence           FLOAT,
+        route_name           TEXT,
+        consumer_username    TEXT,
+        suggested_config     JSONB,
+        yaml_config          TEXT,
+        status               TEXT DEFAULT 'open'
+    );
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: llm-analytics
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: llm-analytics
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: pgvector/pgvector:0.8.0-pg16
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POSTGRES_USER
+              value: postgres
+            - name: POSTGRES_PASSWORD
+              value: postgres
+            - name: POSTGRES_DB
+              value: llm_analytics
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: schema
+              mountPath: /docker-entrypoint-initdb.d
+          resources:
+            requests:
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-pvc
+        - name: schema
+          configMap:
+            name: postgres-schema
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: llm-analytics
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432

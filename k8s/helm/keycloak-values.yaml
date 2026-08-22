@@ -1,0 +1,22 @@
+keycloak:
+  adminUser: admin
+  adminPassword: admin
+  # Lab setup — non-production (maps to Keycloak's start-dev mode)
+  production: false
+
+postgres:
+  auth:
+    username: keycloak
+    password: password
+    database: keycloak
+
+# Expose via LoadBalancer (matches other lab services)
+service:
+  type: LoadBalancer
+  annotations:
+    metallb.universe.tf/loadBalancerIPs: "172.18.255.200"
+
+# Auto-import realm on startup from the keycloak-realm Secret
+realm:
+  import: true
+  existingSecret: keycloak-realm

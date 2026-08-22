@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rest-destinations
+  namespace: rest-destinations
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rest-destinations
+  template:
+    metadata:
+      labels:
+        app: rest-destinations
+    spec:
+      containers:
+        - name: rest-destinations
+          image: rest-destinations:latest
+          imagePullPolicy: Never
+          env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-lgtm.otel-lgtm.svc.cluster.local:4318
+            - name: OTEL_SERVICE_NAME
+              value: rest-destinations
+            - name: OTEL_ENVIRONMENT
+              value: lab
+            - name: OTEL_LOGS_ENABLED
+              value: "true"
+            - name: OTEL_TRACES_ENABLED
+              value: "false"
+            - name: OTEL_PROPAGATION_ENABLED
+              value: "true"
+            - name: OTEL_METRICS_ENABLED
+              value: "true"
+          ports:
+            - containerPort: 8000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rest-destinations
+  namespace: rest-destinations
+spec:
+  selector:
+    app: rest-destinations
+  ports:
+    - port: 8000
+      targetPort: 8000

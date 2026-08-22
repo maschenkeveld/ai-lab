@@ -1,0 +1,281 @@
+openapi: 3.1.0
+info:
+  title: Flight Pricing Demo API
+  version: "1.0.0"
+  description: >
+    Demo REST API that lists a static set of airports and returns a fictive flight price
+    based on route distance, seasonality, and deterministic jitter.
+
+servers:
+  - url: http://localhost:3004
+
+paths:
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Health check
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [ok, time]
+                properties:
+                  ok:
+                    type: boolean
+                  time:
+                    type: string
+                    format: date-time
+              examples:
+                ok:
+                  value:
+                    ok: true
+                    time: "2026-02-08T20:10:30Z"
+
+  /v1/airports:
+    get:
+      operationId: listAirports
+      summary: List available airports
+      responses:
+        "200":
+          description: Airports list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AirportsResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+
+  /v1/price:
+    get:
+      operationId: getPrice
+      summary: Get a fictive price (query params)
+      parameters:
+        - name: from
+          in: query
+          required: true
+          description: Origin airport IATA code
+          schema:
+            type: string
+            pattern: "^[A-Za-z]{3}$"
+          example: AMS
+        - name: to
+          in: query
+          required: true
+          description: Destination airport IATA code
+          schema:
+            type: string
+            pattern: "^[A-Za-z]{3}$"
+          example: BCN
+        - name: date
+          in: query
+          required: true
+          description: Travel date (YYYY-MM-DD)
+          schema:
+            type: string
+            format: date
+          example: "2026-06-15"
+      responses:
+        "200":
+          description: Price computed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PriceResponse"
+              examples:
+                default:
+                  $ref: "#/components/examples/PriceResponseExample"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+
+    post:
+      operationId: postPrice
+      summary: Get a fictive price (JSON body)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PriceRequest"
+            example:
+              from: "AMS"
+              to: "BCN"
+              date: "2026-06-15"
+      responses:
+        "200":
+          description: Price computed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PriceResponse"
+              examples:
+                default:
+                  $ref: "#/components/examples/PriceResponseExample"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+
+components:
+  schemas:
+    Airport:
+      type: object
+      additionalProperties: false
+      required: [code, name, city, country, lat, lon]
+      properties:
+        code:
+          type: string
+          pattern: "^[A-Z]{3}$"
+        name:
+          type: string
+        city:
+          type: string
+        country:
+          type: string
+          minLength: 2
+          maxLength: 2
+        lat:
+          type: number
+          format: double
+        lon:
+          type: number
+          format: double
+
+    AirportsResponse:
+      type: object
+      additionalProperties: false
+      required: [airports, count]
+      properties:
+        airports:
+          type: array
+          items:
+            $ref: "#/components/schemas/Airport"
+        count:
+          type: integer
+          minimum: 0
+
+    PriceRequest:
+      type: object
+      additionalProperties: false
+      required: [from, to, date]
+      properties:
+        from:
+          type: string
+          pattern: "^[A-Za-z]{3}$"
+        to:
+          type: string
+          pattern: "^[A-Za-z]{3}$"
+        date:
+          type: string
+          format: date
+
+    PriceBreakdown:
+      type: object
+      additionalProperties: false
+      required:
+        - base_per_km
+        - base_fare
+        - distance_component
+        - month_multiplier
+        - jitter
+      properties:
+        base_per_km:
+          type: number
+        base_fare:
+          type: number
+        distance_component:
+          type: number
+        month_multiplier:
+          type: number
+        jitter:
+          type: number
+
+    PriceResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - from
+        - to
+        - date
+        - month
+        - distance_km
+        - currency
+        - price
+        - flight_number
+        - breakdown
+      properties:
+        from:
+          type: string
+          pattern: "^[A-Z]{3}$"
+        to:
+          type: string
+          pattern: "^[A-Z]{3}$"
+        date:
+          type: string
+          format: date
+        month:
+          type: integer
+        distance_km:
+          type: number
+        currency:
+          type: string
+        price:
+          type: number
+        flight_number:
+          type: string
+          description: Stable fictive flight number per route
+          pattern: "^KA-[A-Z]{6}$"
+        breakdown:
+          $ref: "#/components/schemas/PriceBreakdown"
+
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+
+  examples:
+    PriceResponseExample:
+      value:
+        from: "AMS"
+        to: "BCN"
+        date: "2026-06-15"
+        month: 6
+        distance_km: 1234.56
+        currency: "EUR"
+        price: 171.42
+        flight_number: "KA-AMSBCN"
+        breakdown:
+          base_per_km: 0.09
+          base_fare: 18
+          distance_component: 111.11
+          month_multiplier: 1.2
+          jitter: -2.91
+
+  responses:
+    BadRequest:
+      description: The request was invalid
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+    MethodNotAllowed:
+      description: The HTTP method is not allowed for this endpoint
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"

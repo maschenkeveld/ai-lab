@@ -1,0 +1,2 @@
+# Unused — Kafka is deployed via plain manifest (manifests/kafka.yaml)
+# Bitnami OCI chart kept here for reference but images require Docker Hub auth

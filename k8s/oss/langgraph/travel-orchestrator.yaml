@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: travel-orchestrator-langgraph
+  namespace: travel-agency-langgraph
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: travel-orchestrator-langgraph
+  template:
+    metadata:
+      labels:
+        app: travel-orchestrator-langgraph
+    spec:
+      containers:
+        - name: travel-orchestrator-langgraph
+          image: travel-orchestrator-langgraph:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 4200
+          env:
+            - name: PORT
+              value: "4200"
+            - name: AGENT_NAME
+              value: travel-orchestrator-langgraph
+            - name: PUBLIC_AGENT_BASE_URL
+              value: http://agentgateway.lab/a2a/travel-orchestrator
+            - name: AGENTGATEWAY_URL
+              value: http://agentgateway.lab
+            - name: DEFAULT_ORIGIN
+              value: AMS
+            - name: DEFAULT_TRAVEL_DATE
+              value: "2026-07-15"
+            - name: LANGCHAIN_TRACING_V2
+              value: "true"
+            - name: LANGCHAIN_PROJECT
+              value: ai-lab-oss
+            - name: LANGCHAIN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: langsmith-secret
+                  key: api-key
+                  optional: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: travel-orchestrator-langgraph
+  namespace: travel-agency-langgraph
+spec:
+  selector:
+    app: travel-orchestrator-langgraph
+  ports:
+    - name: http
+      port: 4200
+      targetPort: 4200

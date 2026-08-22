@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: travel-destination
+  namespace: travel-agency-langgraph
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: travel-destination
+  template:
+    metadata:
+      labels:
+        app: travel-destination
+    spec:
+      containers:
+        - name: travel-destination
+          image: travel-destination:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 4201
+          env:
+            - name: PORT
+              value: "4201"
+            - name: AGENT_NAME
+              value: travel-destination
+            - name: PUBLIC_AGENT_BASE_URL
+              value: http://agentgateway.lab/a2a/destination
+            - name: API_BASE_URL
+              value: http://traefik.traefik.svc.cluster.local
+            - name: API_HOST_HEADER
+              value: traefik-api-gw.lab
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: travel-destination
+  namespace: travel-agency-langgraph
+spec:
+  selector:
+    app: travel-destination
+  ports:
+    - name: http
+      port: 4201
+      targetPort: 4201

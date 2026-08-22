@@ -1,0 +1,11 @@
+# MetalLB — minimal config for Kind cluster
+# IPAddressPool and L2Advertisement are applied separately via metallb:configure
+speaker:
+  frr:
+    enabled: false
+
+frr-k8s:
+  enabled: false
+  prometheus:
+    serviceMonitor:
+      enabled: false
