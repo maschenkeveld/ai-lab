@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rest-flights
+  namespace: rest-flights
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rest-flights
+  template:
+    metadata:
+      labels:
+        app: rest-flights
+    spec:
+      containers:
+        - name: rest-flights
+          image: rest-flights:latest
+          imagePullPolicy: Never
+          env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-lgtm.otel-lgtm.svc.cluster.local:4318
+            - name: OTEL_SERVICE_NAME
+              value: rest-flights
+            - name: OTEL_ENVIRONMENT
+              value: lab
+            - name: OTEL_LOGS_ENABLED
+              value: "true"
+            - name: OTEL_TRACES_ENABLED
+              value: "false"
+            - name: OTEL_PROPAGATION_ENABLED
+              value: "true"
+            - name: OTEL_METRICS_ENABLED
+              value: "true"
+          ports:
+            - containerPort: 8000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rest-flights
+  namespace: rest-flights
+spec:
+  selector:
+    app: rest-flights
+  ports:
+    - port: 8000
+      targetPort: 8000

@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rest-book-flights
+  namespace: rest-book-flights
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rest-book-flights
+  template:
+    metadata:
+      labels:
+        app: rest-book-flights
+    spec:
+      containers:
+        - name: rest-book-flights
+          image: rest-book-flights:latest
+          imagePullPolicy: Never
+          env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-lgtm.otel-lgtm.svc.cluster.local:4318
+            - name: OTEL_SERVICE_NAME
+              value: rest-book-flights
+            - name: OTEL_ENVIRONMENT
+              value: lab
+            - name: OTEL_LOGS_ENABLED
+              value: "true"
+            - name: OTEL_TRACES_ENABLED
+              value: "false"
+            - name: OTEL_PROPAGATION_ENABLED
+              value: "true"
+            - name: OTEL_METRICS_ENABLED
+              value: "true"
+            - name: ADDR
+              value: ":8000"
+            - name: DB_PATH
+              value: /data/bookings.db
+          ports:
+            - containerPort: 8000
+          volumeMounts:
+            - name: bookings-data
+              mountPath: /data
+      volumes:
+        - name: bookings-data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rest-book-flights
+  namespace: rest-book-flights
+spec:
+  selector:
+    app: rest-book-flights
+  ports:
+    - port: 8000
+      targetPort: 8000

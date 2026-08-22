@@ -1,0 +1,18 @@
+[project]
+name = "travel-flight-finder"
+version = "0.1.0"
+description = "Flight-finder specialist — searches for flights via REST API"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115.0",
+  "httpx>=0.27.0",
+  "pydantic>=2.10.0",
+  "uvicorn[standard]>=0.32.0",
+]
+
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["travel_flight_finder*"]

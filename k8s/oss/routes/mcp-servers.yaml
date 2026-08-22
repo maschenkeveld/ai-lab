@@ -1,0 +1,167 @@
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: mcp-dice-roller
+  namespace: agentgateway-system
+spec:
+  mcp:
+    targets:
+      - name: dice-roller
+        static:
+          host: mcp-dice-roller.mcp-dice-roller.svc.cluster.local
+          port: 8000
+          path: /mcp
+          protocol: StreamableHTTP
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: mcp-destinations
+  namespace: agentgateway-system
+spec:
+  mcp:
+    targets:
+      - name: destinations
+        static:
+          host: mcp-destinations.mcp-destinations.svc.cluster.local
+          port: 8000
+          path: /mcp
+          protocol: StreamableHTTP
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: mcp-flights
+  namespace: agentgateway-system
+spec:
+  mcp:
+    targets:
+      - name: flights
+        static:
+          host: mcp-flights.mcp-flights.svc.cluster.local
+          port: 8000
+          path: /mcp
+          protocol: StreamableHTTP
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: mcp-book-flights
+  namespace: agentgateway-system
+spec:
+  mcp:
+    targets:
+      - name: book-flights
+        static:
+          host: mcp-book-flights.mcp-book-flights.svc.cluster.local
+          port: 8000
+          path: /mcp
+          protocol: StreamableHTTP
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mcp-dice-roller
+  namespace: agentgateway-system
+spec:
+  parentRefs:
+    - name: agentgateway-proxy
+      sectionName: http
+  hostnames:
+    - agentgateway.lab
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /mcp-dice-roller
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /mcp
+      backendRefs:
+        - name: mcp-dice-roller
+          group: agentgateway.dev
+          kind: AgentgatewayBackend
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mcp-destinations
+  namespace: agentgateway-system
+spec:
+  parentRefs:
+    - name: agentgateway-proxy
+      sectionName: http
+  hostnames:
+    - agentgateway.lab
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /mcp-destinations
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /mcp
+      backendRefs:
+        - name: mcp-destinations
+          group: agentgateway.dev
+          kind: AgentgatewayBackend
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mcp-flights
+  namespace: agentgateway-system
+spec:
+  parentRefs:
+    - name: agentgateway-proxy
+      sectionName: http
+  hostnames:
+    - agentgateway.lab
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /mcp-flights
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /mcp
+      backendRefs:
+        - name: mcp-flights
+          group: agentgateway.dev
+          kind: AgentgatewayBackend
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mcp-book-flights
+  namespace: agentgateway-system
+spec:
+  parentRefs:
+    - name: agentgateway-proxy
+      sectionName: http
+  hostnames:
+    - agentgateway.lab
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /mcp-book-flights
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /mcp
+      backendRefs:
+        - name: mcp-book-flights
+          group: agentgateway.dev
+          kind: AgentgatewayBackend

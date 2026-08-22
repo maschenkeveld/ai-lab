@@ -1,0 +1,46 @@
+deployment:
+  replicas: 1
+
+providers:
+  kubernetesCRD:
+    enabled: true
+  kubernetesIngress:
+    enabled: false
+  kubernetesGateway:
+    enabled: true
+    experimentalChannel: true
+
+gateway:
+  enabled: false
+
+gatewayClass:
+  enabled: false
+
+ingressClass:
+  enabled: false
+
+logs:
+  general:
+    level: INFO
+  access:
+    enabled: true
+
+ports:
+  web:
+    port: 8000
+    expose:
+      default: true
+    exposedPort: 80
+    protocol: TCP
+  websecure:
+    port: 8443
+    expose:
+      default: true
+    exposedPort: 443
+    protocol: TCP
+
+service:
+  enabled: true
+  type: LoadBalancer
+  annotations:
+    metallb.universe.tf/loadBalancerIPs: 172.18.255.210

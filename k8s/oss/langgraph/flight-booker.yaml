@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: travel-flight-booker
+  namespace: travel-agency-langgraph
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: travel-flight-booker
+  template:
+    metadata:
+      labels:
+        app: travel-flight-booker
+    spec:
+      containers:
+        - name: travel-flight-booker
+          image: travel-flight-booker:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 4204
+          env:
+            - name: PORT
+              value: "4204"
+            - name: AGENT_NAME
+              value: travel-flight-booker
+            - name: PUBLIC_AGENT_BASE_URL
+              value: http://agentgateway.lab/a2a/flight-booker
+            - name: API_BASE_URL
+              value: http://traefik.traefik.svc.cluster.local
+            - name: API_HOST_HEADER
+              value: traefik-api-gw.lab
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: travel-flight-booker
+  namespace: travel-agency-langgraph
+spec:
+  selector:
+    app: travel-flight-booker
+  ports:
+    - name: http
+      port: 4204
+      targetPort: 4204

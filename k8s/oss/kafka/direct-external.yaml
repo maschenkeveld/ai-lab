@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-direct
+  namespace: kafka
+  annotations:
+    metallb.universe.tf/loadBalancerIPs: 172.18.255.212
+spec:
+  type: LoadBalancer
+  selector:
+    app: kafka
+  ports:
+    - name: client
+      port: 9092
+      targetPort: 9092

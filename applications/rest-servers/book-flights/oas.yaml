@@ -1,0 +1,152 @@
+openapi: 3.0.3
+info:
+  title: Booking API
+  version: 1.2.0
+servers:
+  - url: http://localhost:3005
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [ok, time]
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  time:
+                    type: string
+                    format: date-time
+                    example: "2026-02-14T19:22:01Z"
+
+  /v1/bookings:
+    get:
+      summary: List bookings
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [bookings, count]
+                properties:
+                  bookings:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Booking"
+                  count:
+                    type: integer
+                    example: 1
+
+    post:
+      summary: Create a booking
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateBookingRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [booking]
+                properties:
+                  booking:
+                    $ref: "#/components/schemas/Booking"
+
+components:
+  schemas:
+    CreateBookingRequest:
+      type: object
+      additionalProperties: false
+      required: [name, from, to, date]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          example: "Grace Hopper"
+        from:
+          type: string
+          description: 3-letter IATA code
+          pattern: "^[A-Za-z]{3}$"
+          example: "AMS"
+        to:
+          type: string
+          description: 3-letter IATA code
+          pattern: "^[A-Za-z]{3}$"
+          example: "LHR"
+        date:
+          type: string
+          description: Travel date in YYYY-MM-DD
+          pattern: "^\\d{4}-\\d{2}-\\d{2}$"
+          example: "2026-05-01"
+
+    Booking:
+      type: object
+      additionalProperties: false
+      required:
+        - booking_code
+        - flight_number
+        - status
+        - name
+        - from
+        - to
+        - date
+        - created_at
+        - created_at_ts
+      properties:
+        booking_code:
+          type: string
+          description: Airline-style booking reference (PNR-like)
+          pattern: "^[A-Z2-9]{6}$"
+          example: "K7Q2XM"
+        flight_number:
+          type: string
+          description: Flight number in the format KA-<origin><destination>
+          pattern: "^KA-[A-Z]{6}$"
+          example: "KA-AMSLHR"
+        status:
+          type: string
+          description: Booking status
+          enum: ["scheduled"]
+          example: "scheduled"
+        name:
+          type: string
+          minLength: 1
+          example: "Grace Hopper"
+        from:
+          type: string
+          pattern: "^[A-Za-z]{3}$"
+          example: "AMS"
+        to:
+          type: string
+          pattern: "^[A-Za-z]{3}$"
+          example: "LHR"
+        date:
+          type: string
+          pattern: "^\\d{4}-\\d{2}-\\d{2}$"
+          example: "2026-05-01"
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-02-14T19:22:01Z"
+        created_at_ts:
+          type: integer
+          format: int64
+          description: Unix timestamp (seconds)
+          example: 1739568121
