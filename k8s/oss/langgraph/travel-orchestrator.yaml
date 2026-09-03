@@ -32,6 +32,18 @@ spec:
               value: AMS
             - name: DEFAULT_TRAVEL_DATE
               value: "2026-07-15"
+            - name: LITELLM_BASE_URL
+              value: http://litellm.litellm.svc.cluster.local:4000/v1
+            - name: LITELLM_MODEL
+              value: openai-gpt
+            - name: LITELLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-env
+                  key: LITELLM_MASTER_KEY
+                  optional: true
+            - name: CHECKPOINT_DB_URL
+              value: postgresql://postgres:postgres@postgres.llm-analytics.svc.cluster.local:5432/llm_analytics?sslmode=disable
             - name: LANGCHAIN_TRACING_V2
               value: "true"
             - name: LANGCHAIN_PROJECT

@@ -220,6 +220,7 @@ tasks:
     cmds:
       - task: secrets:keycloak-realm
       - task: secrets:litellm
+      - task: secrets:langsmith
 
   secrets:keycloak-realm:
     desc: "Create keycloak-realm Secret from the realm export JSON"
@@ -242,6 +243,20 @@ tasks:
           --from-literal=GEMINI_API_KEY="${GEMINI_KEY:-}" \
           --dry-run=client -o yaml | kubectl apply -f -
         echo "✓ LiteLLM env secret applied to {{.NS_LITELLM}}"
+
+  secrets:langsmith:
+    desc: "Create langsmith-secret from .env for LangGraph/LangSmith tracing (optional — pods run fine without it)"
+    cmds:
+      - |
+        if [ -z "${LANGCHAIN_API_KEY:-}" ]; then
+          echo "→ LANGCHAIN_API_KEY not set in .env, skipping langsmith-secret (tracing stays disabled)"
+        else
+          kubectl create secret generic langsmith-secret \
+            --namespace {{.NS_TRAVEL_LANGGRAPH}} \
+            --from-literal=api-key="${LANGCHAIN_API_KEY}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          echo "✓ langsmith-secret applied to {{.NS_TRAVEL_LANGGRAPH}}"
+        fi
 
   # ─── Helm ─────────────────────────────────────────────────────────────────
 
@@ -385,7 +400,7 @@ tasks:
       - kubectl delete -f {{.TASKFILE_DIR}}/oss/traefik/ || true
 
   oss:langgraph-apply:
-    desc: "Build and apply the LangGraph travel agency (orchestrator + 4 specialists)"
+    desc: "Build, apply, and restart the LangGraph travel agency (orchestrator + 4 specialists)"
     cmds:
       - task: build:travel-orchestrator-langgraph
       - task: build:travel-destination
@@ -393,3 +408,9 @@ tasks:
       - task: build:travel-flight-finder
       - task: build:travel-flight-booker
       - kubectl apply -f {{.TASKFILE_DIR}}/oss/langgraph/
+      # imagePullPolicy: Never + :latest tags means `apply` alone won't pick up new code — restart explicitly.
+      - kubectl rollout restart deploy/travel-orchestrator-langgraph -n {{.NS_TRAVEL_LANGGRAPH}}
+      - kubectl rollout restart deploy/travel-destination -n {{.NS_TRAVEL_LANGGRAPH}}
+      - kubectl rollout restart deploy/travel-destination-decision -n {{.NS_TRAVEL_LANGGRAPH}}
+      - kubectl rollout restart deploy/travel-flight-finder -n {{.NS_TRAVEL_LANGGRAPH}}
+      - kubectl rollout restart deploy/travel-flight-booker -n {{.NS_TRAVEL_LANGGRAPH}}

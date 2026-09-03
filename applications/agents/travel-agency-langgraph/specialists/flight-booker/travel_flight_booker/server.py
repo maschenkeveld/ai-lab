@@ -12,7 +12,9 @@ from typing import Any
 
 import httpx
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from langsmith import traceable
+from langsmith.run_helpers import tracing_context
 from pydantic import BaseModel, Field
 
 API_BASE_URL    = os.getenv("API_BASE_URL",    "http://traefik.traefik.svc.cluster.local")
@@ -50,9 +52,10 @@ def agent_card() -> dict[str, Any]:
 
 @app.post("/a2a/jsonrpc")
 @app.post("/a2a/flight-booker/a2a/jsonrpc")
-def jsonrpc(request: JsonRpcRequest) -> dict[str, Any]:
+def jsonrpc(request: JsonRpcRequest, http_request: Request) -> dict[str, Any]:
     payload = extract_json(request.params or {})
-    result  = book_flight(payload)
+    with tracing_context(parent=dict(http_request.headers)):
+        result = book_flight(payload)
     return {
         "jsonrpc": "2.0",
         "id": request.id,
@@ -64,6 +67,7 @@ def jsonrpc(request: JsonRpcRequest) -> dict[str, Any]:
     }
 
 
+@traceable(name="book_flight")
 def book_flight(payload: dict[str, Any]) -> dict[str, Any]:
     response = httpx.post(
         f"{API_BASE_URL}/book-flights/v1/bookings",

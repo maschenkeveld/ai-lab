@@ -18,6 +18,10 @@ data:
         litellm_params:
           model: ollama_chat/llama3.2
           api_base: http://ollama.default.svc.cluster.local:11434
+      - model_name: embedding-openai
+        litellm_params:
+          model: openai/text-embedding-3-small
+          api_key: os.environ/OPENAI_API_KEY
 
     general_settings:
       master_key: os.environ/LITELLM_MASTER_KEY

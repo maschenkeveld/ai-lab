@@ -5,6 +5,9 @@ metadata:
   namespace: agentgateway-system
 spec:
   gatewayClassName: agentgateway
+  infrastructure:
+    annotations:
+      metallb.universe.tf/loadBalancerIPs: 172.18.255.211
   listeners:
     - protocol: HTTP
       port: 80
