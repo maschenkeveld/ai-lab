@@ -128,28 +128,33 @@ The agentgateway Gateway CRD is at `k8s/oss/agentgateway/gateway.yaml`. The Meta
 
 ### LiteLLM config (`k8s/oss/litellm/config.yaml`)
 
-Stored as a ConfigMap mounted into the LiteLLM pod. Three model aliases:
+Stored as a ConfigMap mounted into the LiteLLM pod. Four model aliases:
 
 | Alias | Backend |
 |---|---|
 | `openai-gpt` | `openai/gpt-4o-mini` |
 | `gemini-pro` | `gemini/gemini-2.5-pro` |
 | `ollama-llama` | `ollama_chat/llama3.2` via in-cluster Ollama |
+| `embedding-openai` | `openai/text-embedding-3-small` |
 
-Master key is `sk-ai-lab-litellm` (hardcoded for local demo). Change it in `k8s/secrets.yaml` or the `litellm-env` Secret.
+Master key is `sk-ai-lab-litellm` (hardcoded for local demo). Change it via `task secrets:litellm` (sourced from `.env`) or the `litellm-env` Secret directly.
 
 To add a model: add a `model_list` entry to the ConfigMap and run `task oss:manifests-apply`.
+
+Consumed by the LangGraph orchestrator and `destination-decision` specialist for chat completions (`LITELLM_BASE_URL=http://litellm.litellm.svc.cluster.local:4000/v1`, alias `openai-gpt` by default) via `langchain-openai`'s `ChatOpenAI`, and by the `destination` specialist for embeddings (alias `embedding-openai`) via `OpenAIEmbeddings` — see "LangGraph agents" below.
 
 ### LangGraph agents (`applications/agents/travel-agency-langgraph/`)
 
 Each agent is a Python package with:
-- `server.py` — FastAPI app, exposes `/.well-known/agent-card.json`, `/a2a/jsonrpc`, `/health`, and (orchestrator only) `/plan`
-- `graph.py` — LangGraph `StateGraph` definition (orchestrator only; specialists have simpler logic)
+- `server.py` — FastAPI app, exposes `/.well-known/agent-card.json`, `/a2a/jsonrpc`, `/health`, and (orchestrator only) `/plan` and `/plan/stream`
+- `graph.py` — orchestrator only; builds a `langgraph.prebuilt.create_react_agent` tool-calling agent (not a hand-authored `StateGraph`)
 - `Dockerfile` — builds a container image named `travel-<agent>-langgraph`
 
-The orchestrator graph calls specialists by making HTTP POST requests to their agentgateway-proxied URLs. Specialist URLs come from env vars (`DESTINATION_AGENT_URL`, etc.) that point at `agentgateway.lab/a2a/<agent>`.
+The orchestrator is an LLM-driven tool-calling agent, not a fixed pipeline: it extracts trip requirements from free text via a structured LLM call, then autonomously calls four `@tool`-wrapped specialist functions (`get_destination_shortlist`, `pick_destination`, `find_flight`, `book_flight`) in a ReAct loop, retrying `pick_destination`/`find_flight` with a growing exclusion list when no flight is found. Each tool sends an A2A JSON-RPC request to a specialist via agentgateway. `destination-decision` also makes an LLM call (structured output) to choose the best candidate instead of a random pick; `destination` does semantic search over an in-memory FAISS index of the destination catalog instead of tag-overlap scoring, embedding it via the LiteLLM proxy's `embedding-openai` alias (`OpenAI text-embedding-3-small`) rather than a local model — keeps the image lightweight, no local ML runtime. `orchestrator` and `destination-decision` call LiteLLM for chat completions via `langchain-openai`'s `ChatOpenAI` (`LITELLM_BASE_URL`/`LITELLM_MODEL`/`LITELLM_API_KEY` env vars, default model alias `openai-gpt`).
 
-LangSmith tracing is enabled when `LANGCHAIN_TRACING_V2=true` and `LANGCHAIN_API_KEY` is set (via `langsmith-secret` k8s Secret). Only the orchestrator is wired.
+Conversation state (including which destinations have been tried) persists per `thread_id` via a `PostgresSaver` checkpointer backed by the existing `llm-analytics` Postgres — pass `thread_id` in a `/plan` call's payload to continue a prior trip-planning conversation; omit it to start a new one. If Postgres isn't reachable, the orchestrator falls back to stateless runs rather than failing startup.
+
+LangSmith tracing is enabled when `LANGCHAIN_TRACING_V2=true` and `LANGCHAIN_API_KEY` is set (via `langsmith-secret` k8s Secret, created by `task secrets:langsmith` from `.env`'s `LANGCHAIN_API_KEY`). All five services are wired (previously only the orchestrator was); specialist handlers are wrapped in `@traceable` and read the orchestrator's trace headers via `langsmith.run_helpers.tracing_context` so one trip-planning request produces a single nested trace tree in the `ai-lab-oss` LangSmith project, instead of five disconnected traces.
 
 To rebuild and redeploy a single agent:
 ```bash
@@ -158,7 +163,7 @@ kind load docker-image travel-orchestrator-langgraph --name ai-lab-oss
 kubectl rollout restart deploy/travel-orchestrator-langgraph -n travel-agency-langgraph
 ```
 
-Or use `task oss:langgraph-apply` to rebuild all five.
+Or use `task oss:langgraph-apply` to rebuild, reapply, and restart all five (the task itself now runs the `kubectl rollout restart` for each Deployment, since `imagePullPolicy: Never` + `:latest` tags mean `kubectl apply` alone won't pick up new code).
 
 ### MCP adapters (`applications/mcp-servers/*-adapter/`)
 
@@ -207,7 +212,7 @@ LGTM stack at `grafana.lab:3000` (admin/admin). Receives OTLP push on port 4318 
 - `mcp-dice-roller`: OTEL traces + logs + metrics via OTLP
 
 **What's not wired (gap vs Kong AI Lab):**
-- LangGraph agents: no OTEL SDK — only LangSmith on the orchestrator
+- LangGraph agents: no OTEL SDK — tracing is via LangSmith (all 5 services, nested into one trace tree per request) instead of OTLP into LGTM
 - LiteLLM: Prometheus `/metrics` endpoint, not pushed to LGTM
 - agentgateway: stdout logs only
 

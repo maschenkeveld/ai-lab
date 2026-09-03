@@ -26,6 +26,26 @@ spec:
               value: travel-destination-decision
             - name: PUBLIC_AGENT_BASE_URL
               value: http://agentgateway.lab/a2a/destination-decision
+            - name: LITELLM_BASE_URL
+              value: http://litellm.litellm.svc.cluster.local:4000/v1
+            - name: LITELLM_MODEL
+              value: openai-gpt
+            - name: LITELLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-env
+                  key: LITELLM_MASTER_KEY
+                  optional: true
+            - name: LANGCHAIN_TRACING_V2
+              value: "true"
+            - name: LANGCHAIN_PROJECT
+              value: ai-lab-oss
+            - name: LANGCHAIN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: langsmith-secret
+                  key: api-key
+                  optional: true
 ---
 apiVersion: v1
 kind: Service

@@ -1,31 +1,45 @@
 """
-LangGraph orchestrator — calls specialist agents via A2A rather than REST APIs directly.
+LangGraph orchestrator — a tool-calling agent that plans and books a trip by
+calling specialist agents via A2A, exposed to the LLM as LangChain tools.
 
-Flow:
-  parse_requirements
-    → call_destination         (destination specialist: get shortlist)
-      → call_destination_decision  (pick one from shortlist, skip already tried)
-        → call_flight_finder       (look for a flight; None on failure)
-          → [route_after_flight]
-              "call_destination_decision"  → retry with next destination
-              "call_flight_booker"
-                → call_flight_booker
-                  → summarize → END
+Flow (enforced by SYSTEM_PROMPT, not by graph topology):
+  extract_requirements (structured LLM call)
+    → agent loop, calling tools as needed:
+        get_destination_shortlist  (destination specialist)
+        pick_destination           (destination-decision specialist; retried with
+                                     growing tried_iata_codes if find_flight fails)
+        find_flight                (flight-finder specialist; None on failure)
+        book_flight                (flight-booker specialist)
+    → final answer message
 
-Each call_* node sends an A2A JSON-RPC request to a specialist service via agentgateway.
-The specialist does the actual work (REST call or computation) and returns a JSON payload
-in the A2A response text. LangSmith traces the full graph automatically when
-LANGCHAIN_TRACING_V2=true and LANGCHAIN_API_KEY are set.
+Each tool sends an A2A JSON-RPC request to a specialist service via agentgateway.
+The specialist does the actual work (REST call, LLM call, or computation) and
+returns a JSON payload in the A2A response text. LangSmith traces the full agent
+run (and, via header propagation in call_specialist, the specialist calls it makes)
+when LANGCHAIN_TRACING_V2=true and LANGCHAIN_API_KEY are set.
+
+Conversation state (including which destinations have been tried) is persisted per
+`thread_id` in Postgres via PostgresSaver, so a caller can continue a trip-planning
+conversation across multiple /plan calls.
 """
 
 import json
+import logging
 import os
-import re
 import uuid
-from typing import Any, TypedDict
+from typing import Any, AsyncIterator
 
 import httpx
-from langgraph.graph import END, StateGraph
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import tool
+from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.prebuilt import create_react_agent
+from langsmith.run_helpers import get_current_run_tree
+from pydantic import BaseModel, Field
+from psycopg_pool import ConnectionPool
+
+logger = logging.getLogger(__name__)
 
 
 # Specialist A2A base URLs — routed through agentgateway so traffic is observable/proxied.
@@ -39,197 +53,253 @@ DEFAULT_PASSENGER = os.getenv("DEFAULT_PASSENGER", "Maarten")
 DEFAULT_ORIGIN    = os.getenv("DEFAULT_ORIGIN", "AMS")
 DEFAULT_DATE      = os.getenv("DEFAULT_TRAVEL_DATE", "2026-07-15")
 
+LITELLM_BASE_URL = os.getenv("LITELLM_BASE_URL", "http://litellm.litellm.svc.cluster.local:4000/v1")
+LITELLM_API_KEY  = os.getenv("LITELLM_API_KEY", "sk-ai-lab-litellm")
+LITELLM_MODEL    = os.getenv("LITELLM_MODEL", "openai-gpt")
 
-# ---------------------------------------------------------------------------
-# State
-# ---------------------------------------------------------------------------
-
-class TravelState(TypedDict, total=False):
-    prompt: str
-    requirements: dict[str, Any]
-    shortlist: list[dict[str, Any]]
-    tried_iata_codes: list[str]            # IATA codes already attempted — used by retry loop
-    selected_destination: dict[str, Any]
-    flight: dict[str, Any] | None          # None means no flight found
-    booking: dict[str, Any]
-    answer: str
-    errors: list[str]
+CHECKPOINT_DB_URL = os.getenv(
+    "CHECKPOINT_DB_URL",
+    "postgresql://postgres:postgres@postgres.llm-analytics.svc.cluster.local:5432/llm_analytics?sslmode=disable",
+)
 
 
 # ---------------------------------------------------------------------------
-# Nodes
+# LLM
 # ---------------------------------------------------------------------------
 
-def parse_requirements(state: TravelState) -> TravelState:
-    """Node 1 — extract structured requirements from the free-text prompt."""
-    prompt = state.get("prompt", "").strip()
-    requirements = {
-        "passenger_name": extract_name(prompt) or DEFAULT_PASSENGER,
-        "origin":         extract_iata(prompt, default=DEFAULT_ORIGIN),
-        "date":           extract_date(prompt) or DEFAULT_DATE,
-        "region":         "Europe",
-        "budget_level":   extract_budget(prompt) or "high",
-        "vibes":          extract_terms(prompt, ["culture", "city", "food", "design", "nature", "relax", "nightlife"]),
-        "activities":     extract_terms(prompt, ["museums", "architecture", "food", "shopping", "music", "walking"]),
-    }
-    if not requirements["vibes"]:
-        requirements["vibes"] = ["culture", "city"]
-    if not requirements["activities"]:
-        requirements["activities"] = ["museums"]
-    return {**state, "requirements": requirements, "errors": []}
+def build_llm() -> ChatOpenAI:
+    """A LangChain chat model pointed at the in-cluster LiteLLM proxy."""
+    return ChatOpenAI(base_url=LITELLM_BASE_URL, api_key=LITELLM_API_KEY, model=LITELLM_MODEL, temperature=0)
 
 
-def call_destination(state: TravelState) -> TravelState:
+# ---------------------------------------------------------------------------
+# Requirement extraction — structured LLM call, replaces regex parsing
+# ---------------------------------------------------------------------------
+
+class TripRequirements(BaseModel):
+    passenger_name: str = Field(description=f"Passenger's first name. Default '{DEFAULT_PASSENGER}' if not mentioned.")
+    origin: str = Field(description=f"3-letter IATA origin airport code. Default '{DEFAULT_ORIGIN}' if not mentioned.")
+    date: str = Field(description=f"Travel date as YYYY-MM-DD. Default '{DEFAULT_DATE}' if not mentioned.")
+    region: str = Field(default="Europe", description="Region to travel within.")
+    budget_level: str = Field(description="One of 'low', 'mid', 'high'. Default 'high' if not mentioned.")
+    vibes: list[str] = Field(
+        description="Desired trip vibes, chosen from: culture, city, food, design, nature, relax, "
+                     "nightlife. Default ['culture', 'city'] if none are mentioned."
+    )
+    activities: list[str] = Field(
+        description="Desired activities, chosen from: museums, architecture, food, shopping, music, "
+                     "walking. Default ['museums'] if none are mentioned."
+    )
+
+
+def extract_requirements(prompt: str, llm: ChatOpenAI) -> dict[str, Any]:
+    """Extract structured trip requirements from a free-text prompt via an LLM call."""
+    structured_llm = llm.with_structured_output(TripRequirements)
+    messages = [
+        SystemMessage(content="Extract structured trip requirements from the traveller's request below."),
+        HumanMessage(content=prompt.strip()),
+    ]
+    requirements: TripRequirements = structured_llm.invoke(messages)
+    return requirements.model_dump()
+
+
+# ---------------------------------------------------------------------------
+# Tools — each wraps an A2A call to a specialist agent
+# ---------------------------------------------------------------------------
+
+@tool
+def get_destination_shortlist(vibes: list[str], budget_level: str, activities: list[str], origin: str, limit: int = 5) -> str:
+    """Look up a shortlist of candidate destinations from the destinations specialist.
+
+    Args:
+        vibes: desired travel vibes, e.g. ["culture", "city"].
+        budget_level: one of "low", "mid", "high".
+        activities: desired activities, e.g. ["museums"].
+        origin: traveller's origin airport IATA code (used to exclude destinations reachable without flying).
+        limit: maximum number of candidates to return.
+
+    Returns:
+        JSON string: {"destinations": [{"name", "country", "airport_iata_codes", "blurb", ...}, ...]}
     """
-    Node 2 — call the destination specialist to get a shortlist.
-
-    Sends vibes/budget/activities to the destination specialist via A2A.
-    The specialist queries the REST destinations API and returns up to 5 candidates.
-    """
-    req = state["requirements"]
     result = call_specialist(SPECIALIST_DESTINATION, {
-        "vibes":        req["vibes"],
-        "budget_level": req["budget_level"],
-        "activities":   req["activities"],
-        "limit":        5,
-        "origin":       req["origin"],
+        "vibes": vibes, "budget_level": budget_level, "activities": activities, "limit": limit, "origin": origin,
     })
-    return {**state, "shortlist": result.get("destinations", [])}
+    return json.dumps(result)
 
 
-def call_destination_decision(state: TravelState) -> TravelState:
-    """
-    Node 3 — call the destination-decision specialist to pick one destination.
+@tool
+def pick_destination(shortlist: list[dict[str, Any]], tried_iata_codes: list[str] | None = None) -> str:
+    """Pick one destination from the shortlist, excluding any already-tried IATA codes.
 
-    Passes the full shortlist and the list of already-tried IATA codes so the
-    specialist can exclude previous picks. Called once on the first pass and
-    again on each retry when flight-finder returns nothing.
+    Call this again with tried_iata_codes extended by the last attempted IATA code whenever
+    find_flight returns no flight, to get the next-best untried destination.
+
+    Returns:
+        JSON string: {"selected_destination": {...}}
     """
     result = call_specialist(SPECIALIST_DESTINATION_DECISION, {
-        "shortlist":          state["shortlist"],
-        "tried_iata_codes":   state.get("tried_iata_codes") or [],
-        "seed":               state.get("prompt", ""),
+        "shortlist": shortlist, "tried_iata_codes": tried_iata_codes or [],
     })
-    return {**state, "selected_destination": result["selected_destination"]}
+    return json.dumps(result)
 
 
-def call_flight_finder(state: TravelState) -> TravelState:
+@tool
+def find_flight(origin: str, to_iata: str, date: str) -> str:
+    """Look up a flight from origin to a destination airport on a given date.
+
+    Returns:
+        JSON string {"flight": {...}} on success, or {"flight": null} if none is available — in that
+        case call pick_destination again with to_iata added to tried_iata_codes and retry.
     """
-    Node 4 — call the flight-finder specialist.
-
-    On success, `flight` is populated. On failure (no availability, HTTP error),
-    `flight` is set to None so the router sends us back to call_destination_decision.
-    `tried_iata_codes` is updated here so the retry always excludes this pick.
-    """
-    req         = state["requirements"]
-    destination = state["selected_destination"]
-    to_iata     = destination["airport_iata_codes"][0]
-    tried       = list(state.get("tried_iata_codes") or []) + [to_iata]
     try:
-        result = call_specialist(SPECIALIST_FLIGHT_FINDER, {
-            "origin":   req["origin"],
-            "to_iata":  to_iata,
-            "date":     req["date"],
-        })
-        return {**state, "flight": result.get("flight"), "tried_iata_codes": tried}
+        result = call_specialist(SPECIALIST_FLIGHT_FINDER, {"origin": origin, "to_iata": to_iata, "date": date})
     except Exception:
-        return {**state, "flight": None, "tried_iata_codes": tried}
+        result = {"flight": None}
+    return json.dumps(result)
 
 
-def call_flight_booker(state: TravelState) -> TravelState:
-    """Node 5 — call the flight-booker specialist to confirm the booking."""
-    req    = state["requirements"]
-    flight = state["flight"]
+@tool
+def book_flight(passenger_name: str, from_: str, to: str, date: str) -> str:
+    """Book the previously-found flight for the passenger. Only call this after find_flight succeeded.
+
+    Args:
+        passenger_name: name to book the flight under.
+        from_: origin airport IATA code (the flight's "from").
+        to: destination airport IATA code (the flight's "to").
+        date: travel date as YYYY-MM-DD.
+
+    Returns:
+        JSON string {"booking": {...}}.
+    """
     result = call_specialist(SPECIALIST_FLIGHT_BOOKER, {
-        "passenger_name": req["passenger_name"],
-        "from":           flight["from"],
-        "to":             flight["to"],
-        "date":           flight["date"],
+        "passenger_name": passenger_name, "from": from_, "to": to, "date": date,
     })
-    return {**state, "booking": result["booking"]}
+    return json.dumps(result)
 
 
-def summarize(state: TravelState) -> TravelState:
-    """Node 6 — build the final human-readable answer. Always the last node before END."""
-    destination  = state.get("selected_destination") or {}
-    flight       = state.get("flight")
-    booking      = state.get("booking")
-    shortlist_lines = [
-        f"{idx}. {item['name']}, {item['country']} ({item['airport_iata_codes'][0]}) - {item['blurb']}"
-        for idx, item in enumerate(state.get("shortlist") or [], start=1)
-    ]
-    if flight is None:
-        answer = "\n".join([
-            "Travel workflow completed — no available flights found for any shortlisted destination.",
-            "", "Shortlist:", *shortlist_lines,
-        ])
-    else:
-        answer = "\n".join([
-            "Travel workflow completed.", "", "Shortlist:", *shortlist_lines, "",
-            f"Selected destination: {destination.get('name')}, {destination.get('country')} ({destination.get('airport_iata_codes', ['?'])[0]})",
-            f"Flight: {flight['flight_number']} {flight['from']} -> {flight['to']} on {flight['date']} for {flight['currency']} {flight['price']:.2f}",
-            f"Booking: {booking['booking_code']} for {booking['name']} ({booking['status']})",
-        ])
-    return {**state, "answer": answer}
+TOOLS = [get_destination_shortlist, pick_destination, find_flight, book_flight]
+
+SYSTEM_PROMPT = """You are a travel booking orchestrator. Plan and book one trip per conversation by \
+calling tools in this order:
+
+1. get_destination_shortlist — using the traveller's vibes/budget/activities/origin.
+2. pick_destination — pick one candidate from the shortlist you haven't tried yet.
+3. find_flight — look for a flight to the picked destination.
+   - If find_flight returns {"flight": null}, call pick_destination again, passing every IATA code \
+you've tried so far in tried_iata_codes, then call find_flight again for the new pick.
+   - If every destination in the shortlist has been tried with no flight found, stop and tell the \
+user no flights were available, listing the shortlist you considered.
+4. book_flight — as soon as find_flight succeeds, book that flight immediately.
+
+Once booked, reply with a human-readable summary: the shortlist you considered, the destination you \
+picked, the flight details (flight number, route, date, price), and the booking confirmation (code, \
+status). Never call book_flight before find_flight has succeeded for that destination. Do not ask the \
+user clarifying questions — infer sensible defaults and proceed autonomously."""
 
 
 # ---------------------------------------------------------------------------
-# Router
+# Agent — LangGraph prebuilt ReAct agent, replaces the hand-authored StateGraph
 # ---------------------------------------------------------------------------
 
-def route_after_flight(state: TravelState) -> str:
+_pool: ConnectionPool | None = None
+_agent = None
+
+
+def build_checkpointer():
+    """A Postgres-backed checkpointer for cross-request conversation memory.
+
+    Falls back to no checkpointer (stateless runs) if Postgres isn't reachable,
+    so the agent still works in environments without the llm-analytics Postgres.
     """
-    If flight-finder returned nothing and the shortlist isn't exhausted, loop
-    back to call_destination_decision for the next pick. Otherwise proceed to booking.
-    """
-    if state.get("flight") is None:
-        tried    = state.get("tried_iata_codes") or []
-        shortlist = state.get("shortlist") or []
-        if len(tried) < len(shortlist):
-            return "call_destination_decision"
-    return "call_flight_booker"
+    global _pool
+    try:
+        _pool = ConnectionPool(conninfo=CHECKPOINT_DB_URL, max_size=10, kwargs={"autocommit": True, "prepare_threshold": 0})
+        checkpointer = PostgresSaver(_pool)
+        checkpointer.setup()
+        return checkpointer
+    except Exception:
+        logger.warning("Postgres checkpointer unavailable at %s — falling back to stateless runs", CHECKPOINT_DB_URL, exc_info=True)
+        return None
 
 
-# ---------------------------------------------------------------------------
-# Graph
-# ---------------------------------------------------------------------------
+def build_agent():
+    llm = build_llm()
+    checkpointer = build_checkpointer()
+    return create_react_agent(llm, TOOLS, prompt=SYSTEM_PROMPT, checkpointer=checkpointer)
 
-def build_graph():
-    """
-    Compile the orchestrator graph.
 
-    parse_requirements → call_destination → call_destination_decision ←──────────┐
-                                                  ↓                               │
-                                           call_flight_finder                     │
-                                                  ↓                               │
-                                     [route_after_flight]                         │
-                                       "call_destination_decision" ───────────────┘
-                                       "call_flight_booker"
-                                                  ↓
-                                          call_flight_booker → summarize → END
-    """
-    graph = StateGraph(TravelState)
+def get_agent():
+    global _agent
+    if _agent is None:
+        _agent = build_agent()
+    return _agent
 
-    graph.add_node("parse_requirements",        parse_requirements)
-    graph.add_node("call_destination",          call_destination)
-    graph.add_node("call_destination_decision", call_destination_decision)
-    graph.add_node("call_flight_finder",        call_flight_finder)
-    graph.add_node("call_flight_booker",        call_flight_booker)
-    graph.add_node("summarize",                 summarize)
 
-    graph.set_entry_point("parse_requirements")
-    graph.add_edge("parse_requirements",        "call_destination")
-    graph.add_edge("call_destination",          "call_destination_decision")
-    graph.add_edge("call_destination_decision", "call_flight_finder")
-    graph.add_conditional_edges(
-        "call_flight_finder",
-        route_after_flight,
-        {"call_flight_booker": "call_flight_booker", "call_destination_decision": "call_destination_decision"},
-    )
-    graph.add_edge("call_flight_booker", "summarize")
-    graph.add_edge("summarize", END)
+async def run_agent(prompt: str, thread_id: str) -> dict[str, Any]:
+    """Extract requirements, run the agent to completion, and shape a backward-compatible result dict."""
+    requirements = extract_requirements(prompt, build_llm())
+    agent = get_agent()
+    initial_message = HumanMessage(content=json.dumps({"trip_request": prompt, "requirements": requirements}))
+    config = {"configurable": {"thread_id": thread_id}}
+    result = await agent.ainvoke({"messages": [initial_message]}, config=config)
+    return summarize_result(result, requirements)
 
-    return graph.compile()
+
+async def stream_agent(prompt: str, thread_id: str) -> AsyncIterator[dict[str, Any]]:
+    """Stream agent execution events (token chunks, tool start/end) for a single trip-planning run."""
+    requirements = extract_requirements(prompt, build_llm())
+    agent = get_agent()
+    initial_message = HumanMessage(content=json.dumps({"trip_request": prompt, "requirements": requirements}))
+    config = {"configurable": {"thread_id": thread_id}}
+    async for event in agent.astream_events({"messages": [initial_message]}, config=config, version="v2"):
+        yield event
+
+
+def summarize_result(result: dict[str, Any], requirements: dict[str, Any]) -> dict[str, Any]:
+    """Pull the final answer plus each tool's last result out of the agent's message history."""
+    messages = result.get("messages") or []
+    answer = messages[-1].content if messages else ""
+    shortlist = selected_destination = flight = booking = None
+    for message in messages:
+        if not isinstance(message, ToolMessage):
+            continue
+        try:
+            payload = json.loads(message.content)
+        except (TypeError, ValueError):
+            continue
+        if message.name == "get_destination_shortlist":
+            shortlist = payload.get("destinations")
+        elif message.name == "pick_destination":
+            selected_destination = payload.get("selected_destination")
+        elif message.name == "find_flight":
+            flight = payload.get("flight")
+        elif message.name == "book_flight":
+            booking = payload.get("booking")
+    return {
+        "answer": answer,
+        "requirements": requirements,
+        "shortlist": shortlist,
+        "selected_destination": selected_destination,
+        "flight": flight,
+        "booking": booking,
+    }
+
+
+def serialize_event(event: dict[str, Any]) -> dict[str, Any]:
+    """Reduce a LangGraph astream_events payload to a JSON-serializable summary for SSE."""
+    kind = event.get("event")
+    name = event.get("name")
+    data = event.get("data") or {}
+    out: dict[str, Any] = {"event": kind, "name": name}
+    if kind == "on_chat_model_stream":
+        chunk = data.get("chunk")
+        out["content"] = getattr(chunk, "content", "") or ""
+    elif kind == "on_tool_start":
+        out["input"] = data.get("input")
+    elif kind == "on_tool_end":
+        output = data.get("output")
+        out["output"] = getattr(output, "content", output)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +313,10 @@ def call_specialist(base_url: str, payload: dict[str, Any]) -> dict[str, Any]:
     The payload is serialized as JSON and placed in the A2A message text field.
     The specialist returns its result the same way — JSON in the response text.
     Routing through agentgateway means all inter-agent traffic is observable.
+
+    The current LangSmith run's trace headers are attached (when tracing is active and this
+    is called from within a traced tool run) so specialists that read them via
+    `langsmith.run_helpers.tracing_context` nest their spans under this run.
     """
     body = {
         "jsonrpc": "2.0",
@@ -255,37 +329,16 @@ def call_specialist(base_url: str, payload: dict[str, Any]) -> dict[str, Any]:
             }
         },
     }
+    headers = {}
+    run_tree = get_current_run_tree()
+    if run_tree is not None:
+        try:
+            headers = run_tree.to_headers()
+        except Exception:
+            headers = {}
     with httpx.Client(timeout=30.0) as client:
-        response = client.post(f"{base_url}/a2a/jsonrpc", json=body)
+        response = client.post(f"{base_url}/a2a/jsonrpc", json=body, headers=headers)
         response.raise_for_status()
     result = response.json()
     text = result["result"]["parts"][0]["text"]
     return json.loads(text)
-
-
-# ---------------------------------------------------------------------------
-# Prompt parsing helpers
-# ---------------------------------------------------------------------------
-
-def extract_name(prompt: str) -> str | None:
-    match = re.search(r"\bfor\s+([A-Z][a-zA-Z-]{1,40})\b", prompt)
-    return match.group(1) if match else None
-
-def extract_iata(prompt: str, default: str) -> str:
-    match = re.search(r"\bfrom\s+([A-Z]{3})\b", prompt)
-    return match.group(1) if match else default
-
-def extract_date(prompt: str) -> str | None:
-    match = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", prompt)
-    return match.group(1) if match else None
-
-def extract_budget(prompt: str) -> str | None:
-    lowered = prompt.lower()
-    for budget in ("low", "mid", "high"):
-        if re.search(rf"\b{budget}\b", lowered):
-            return budget
-    return None
-
-def extract_terms(prompt: str, allowed: list[str]) -> list[str]:
-    lowered = prompt.lower()
-    return [term for term in allowed if re.search(rf"\b{re.escape(term)}\b", lowered)]
