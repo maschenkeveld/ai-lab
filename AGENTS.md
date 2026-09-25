@@ -11,7 +11,7 @@ Build and maintain a local OSS AI lab using:
 - **Traefik OSS** — Kubernetes Gateway API HTTP routing for REST APIs
 - **LiteLLM Proxy** — OpenAI-compatible LLM gateway (multi-provider, key auth)
 - **agentgateway** — MCP tool routing and A2A agent-to-agent traffic
-- **Python + LangGraph** — travel agency multi-agent workflow (5 microservices)
+- **Python + LangGraph** — travel agency multi-agent workflow (5 microservices, each using MCP tools)
 - **FastMCP** — thin Python adapters that expose Go REST APIs as MCP tools
 - **Direct Kafka** — KRaft broker exposed as a LoadBalancer (no Kafka proxy layer)
 - **Keycloak** — OIDC identity provider (configured, not yet enforced on routes)
@@ -141,7 +141,7 @@ Master key is `sk-ai-lab-litellm` (hardcoded for local demo). Change it via `tas
 
 To add a model: add a `model_list` entry to the ConfigMap and run `task oss:manifests-apply`.
 
-Consumed by the LangGraph orchestrator and `destination-decision` specialist for chat completions (`LITELLM_BASE_URL=http://litellm.litellm.svc.cluster.local:4000/v1`, alias `openai-gpt` by default) via `langchain-openai`'s `ChatOpenAI`, and by the `destination` specialist for embeddings (alias `embedding-openai`) via `OpenAIEmbeddings` — see "LangGraph agents" below.
+Consumed by the LangGraph orchestrator for chat completions (`LITELLM_BASE_URL=http://litellm.litellm.svc.cluster.local:4000/v1`, alias `openai-gpt` by default) via `langchain-openai`'s `ChatOpenAI`, and by the `destination` specialist for embeddings-based re-ranking (alias `embedding-openai`) via `OpenAIEmbeddings` — see "LangGraph agents" below. `destination-decision` doesn't call an LLM at all; it picks via the `mcp-dice-roller` MCP tool.
 
 ### LangGraph agents (`applications/agents/travel-agency-langgraph/`)
 
@@ -150,7 +150,18 @@ Each agent is a Python package with:
 - `graph.py` — orchestrator only; builds a `langgraph.prebuilt.create_react_agent` tool-calling agent (not a hand-authored `StateGraph`)
 - `Dockerfile` — builds a container image named `travel-<agent>-langgraph`
 
-The orchestrator is an LLM-driven tool-calling agent, not a fixed pipeline: it extracts trip requirements from free text via a structured LLM call, then autonomously calls four `@tool`-wrapped specialist functions (`get_destination_shortlist`, `pick_destination`, `find_flight`, `book_flight`) in a ReAct loop, retrying `pick_destination`/`find_flight` with a growing exclusion list when no flight is found. Each tool sends an A2A JSON-RPC request to a specialist via agentgateway. `destination-decision` also makes an LLM call (structured output) to choose the best candidate instead of a random pick; `destination` does semantic search over an in-memory FAISS index of the destination catalog instead of tag-overlap scoring, embedding it via the LiteLLM proxy's `embedding-openai` alias (`OpenAI text-embedding-3-small`) rather than a local model — keeps the image lightweight, no local ML runtime. `orchestrator` and `destination-decision` call LiteLLM for chat completions via `langchain-openai`'s `ChatOpenAI` (`LITELLM_BASE_URL`/`LITELLM_MODEL`/`LITELLM_API_KEY` env vars, default model alias `openai-gpt`).
+The orchestrator is an LLM-driven tool-calling agent: it extracts trip requirements from free text via a structured LLM call, then autonomously calls four `@tool`-wrapped specialist functions (`get_destination_shortlist`, `pick_destination`, `find_flight`, `book_flight`) in a ReAct loop, retrying with a growing exclusion list when no flight is found. Each tool sends an A2A JSON-RPC request to a specialist via agentgateway.
+
+Each specialist uses `langchain-mcp-adapters` (`MultiServerMCPClient`) to call MCP tools through agentgateway instead of making direct HTTP calls:
+
+| Specialist | MCP server (via agentgateway) | Tool used |
+|---|---|---|
+| `destination` | `agentgateway.lab/mcp-destinations` | `list_destinations` |
+| `destination-decision` | `agentgateway.lab/mcp-dice-roller` | `roll-20` (index into shortlist) |
+| `flight-finder` | `agentgateway.lab/mcp-flights` | `flight_price` |
+| `flight-booker` | `agentgateway.lab/mcp-book-flights` | `create_booking` |
+
+MCP tool discovery (`tools/list`) happens at pod startup via FastAPI `lifespan`. The orchestrator calls LiteLLM for chat completions (`LITELLM_BASE_URL`/`LITELLM_MODEL`/`LITELLM_API_KEY`, default alias `openai-gpt`). The `destination` specialist additionally calls LiteLLM's `embedding-openai` alias via `OpenAIEmbeddings` to semantically re-rank the `list_destinations` candidates against the trip request, falling back to the MCP tool's keyword-filtered order if the embedding call fails.
 
 Conversation state (including which destinations have been tried) persists per `thread_id` via a `PostgresSaver` checkpointer backed by the existing `llm-analytics` Postgres — pass `thread_id` in a `/plan` call's payload to continue a prior trip-planning conversation; omit it to start a new one. If Postgres isn't reachable, the orchestrator falls back to stateless runs rather than failing startup.
 

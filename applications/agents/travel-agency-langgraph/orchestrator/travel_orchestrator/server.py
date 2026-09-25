@@ -11,6 +11,9 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .graph import run_agent, serialize_event, stream_agent
+from .otel import setup_otel
+
+setup_otel("travel-orchestrator")
 
 AGENT_NAME = os.getenv("AGENT_NAME", "travel-orchestrator-langgraph")
 PUBLIC_AGENT_BASE_URL = os.getenv("PUBLIC_AGENT_BASE_URL", "http://agentgateway.lab/a2a/travel-orchestrator")

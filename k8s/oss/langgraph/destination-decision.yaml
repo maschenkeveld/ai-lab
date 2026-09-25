@@ -20,6 +20,8 @@ spec:
           ports:
             - containerPort: 4202
           env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: __OTEL_ENDPOINT__
             - name: PORT
               value: "4202"
             - name: AGENT_NAME
@@ -38,6 +40,8 @@ spec:
                   optional: true
             - name: LANGCHAIN_TRACING_V2
               value: "true"
+            - name: LANGCHAIN_ENDPOINT
+              value: "https://eu.api.smith.langchain.com"
             - name: LANGCHAIN_PROJECT
               value: ai-lab-oss
             - name: LANGCHAIN_API_KEY

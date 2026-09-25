@@ -1,12 +1,17 @@
 [project]
 name = "travel-flight-finder"
 version = "0.1.0"
-description = "Flight-finder specialist — searches for flights via REST API"
+description = "Flight-finder specialist — searches for flights via MCP flights adapter"
 requires-python = ">=3.12"
 dependencies = [
   "fastapi>=0.115.0",
-  "httpx>=0.27.0",
+  "langchain-mcp-adapters>=0.1.7",
   "langsmith>=0.1.100",
+  "opentelemetry-sdk>=1.25.0",
+  "opentelemetry-exporter-otlp-proto-http>=1.25.0",
+  "opentelemetry-instrumentation-fastapi>=0.46b0",
+  "opentelemetry-instrumentation-httpx>=0.46b0",
+  "opentelemetry-instrumentation-logging>=0.46b0",
   "pydantic>=2.10.0",
   "uvicorn[standard]>=0.32.0",
 ]

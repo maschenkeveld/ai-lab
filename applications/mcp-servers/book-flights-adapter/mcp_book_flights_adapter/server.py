@@ -5,6 +5,9 @@ import httpx
 from fastmcp import FastMCP
 from pydantic import Field
 
+from .otel import setup_otel
+
+setup_otel("mcp-book-flights-adapter")
 
 BOOK_FLIGHTS_BASE_URL = os.getenv(
     "BOOK_FLIGHTS_BASE_URL",
