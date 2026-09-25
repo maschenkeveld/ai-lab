@@ -21,6 +21,14 @@ agentgateway.lab        agentgateway-proxy.agentgateway-system.svc.cluster.local
 kafka-direct.lab        kafka-direct.kafka.svc.cluster.local
 EOF
 
+# Drop entries for services that aren't deployed locally in external mode.
+if [ "${KEYCLOAK_MODE:-local}" != "local" ]; then
+  MAPPINGS=$(echo "$MAPPINGS" | grep -v '^keycloak\.lab')
+fi
+if [ "${OBSERVABILITY_MODE:-local}" != "local" ]; then
+  MAPPINGS=$(echo "$MAPPINGS" | grep -v '^grafana\.lab')
+fi
+
 # Pull the current Corefile, strip any prior block, inject the new block right after "errors".
 NEW_COREFILE=$(MAPPINGS="$MAPPINGS" \
               MARKER_BEGIN="$MARKER_BEGIN" \

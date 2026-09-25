@@ -19,7 +19,7 @@ spec:
           imagePullPolicy: Never
           env:
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: http://otel-lgtm.otel-lgtm.svc.cluster.local:4318
+              value: __OTEL_ENDPOINT__
             - name: OTEL_SERVICE_NAME
               value: rest-book-flights
             - name: OTEL_ENVIRONMENT

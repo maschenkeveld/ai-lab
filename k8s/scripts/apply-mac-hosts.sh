@@ -15,17 +15,23 @@ MARKER_END="# END ai-lab hostnames"
 
 # Hostname → pinned MetalLB IP (must match the annotations in k8s/helm + k8s/manifests)
 declare -a MAPPINGS=(
-  "keycloak.lab           172.18.255.200"
   "kafka-ui.lab           172.18.255.205"
   "analytics.lab          172.18.255.206"
   "analytics-api.lab      172.18.255.207"
-  "grafana.lab            172.18.255.208"
   "n8n.lab                172.18.255.209"
   "traefik-api-gw.lab     172.18.255.210"
   "litellm.lab            172.18.255.210"
   "agentgateway.lab       172.18.255.211"
   "kafka-direct.lab       172.18.255.212"
 )
+
+# Only map hostnames for services actually deployed locally.
+if [ "${KEYCLOAK_MODE:-local}" = "local" ]; then
+  MAPPINGS+=("keycloak.lab           172.18.255.200")
+fi
+if [ "${OBSERVABILITY_MODE:-local}" = "local" ]; then
+  MAPPINGS+=("grafana.lab            172.18.255.208")
+fi
 
 # Build the new block
 BLOCK="${MARKER_BEGIN}"$'\n'
@@ -58,4 +64,8 @@ TMP=$(mktemp)
 sudo cp "$TMP" "$HOSTS_FILE"
 rm -f "$TMP"
 
-echo "✓ Done. Try: curl http://keycloak.lab:8080/realms/ai-lab/.well-known/openid-configuration"
+if [ "${KEYCLOAK_MODE:-local}" = "local" ]; then
+  echo "✓ Done. Try: curl http://keycloak.lab:8080/realms/ai-lab/.well-known/openid-configuration"
+else
+  echo "✓ Done. KEYCLOAK_MODE=external — using ${KEYCLOAK_EXTERNAL_URL:-<KEYCLOAK_EXTERNAL_URL not set>}"
+fi

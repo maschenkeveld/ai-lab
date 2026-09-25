@@ -20,6 +20,8 @@ spec:
           ports:
             - containerPort: 4200
           env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: __OTEL_ENDPOINT__
             - name: PORT
               value: "4200"
             - name: AGENT_NAME
@@ -46,6 +48,8 @@ spec:
               value: postgresql://postgres:postgres@postgres.llm-analytics.svc.cluster.local:5432/llm_analytics?sslmode=disable
             - name: LANGCHAIN_TRACING_V2
               value: "true"
+            - name: LANGCHAIN_ENDPOINT
+              value: "https://eu.api.smith.langchain.com"
             - name: LANGCHAIN_PROJECT
               value: ai-lab-oss
             - name: LANGCHAIN_API_KEY

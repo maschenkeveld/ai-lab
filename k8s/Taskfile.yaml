@@ -39,7 +39,17 @@ tasks:
         kubectl get svc -A --field-selector spec.type=LoadBalancer \
           -o custom-columns='NAMESPACE:.metadata.namespace,NAME:.metadata.name,EXTERNAL-IP:.status.loadBalancer.ingress[0].ip,PORTS:.spec.ports[*].port'
         echo ""
-        echo "Hostnames: keycloak.lab:8080, traefik-api-gw.lab, litellm.lab, agentgateway.lab, kafka-direct.lab, grafana.lab:3000"
+        echo "Hostnames: traefik-api-gw.lab, litellm.lab, agentgateway.lab, kafka-direct.lab"
+        if [ "${KEYCLOAK_MODE:-local}" = "local" ]; then
+          echo "  · Keycloak (local):        keycloak.lab:8080"
+        else
+          echo "  · Keycloak (external):     ${KEYCLOAK_EXTERNAL_URL:-<KEYCLOAK_EXTERNAL_URL not set>}"
+        fi
+        if [ "${OBSERVABILITY_MODE:-local}" = "local" ]; then
+          echo "  · Observability (local):   grafana.lab:3000"
+        else
+          echo "  · Observability (external): ${OTEL_EXTERNAL_ENDPOINT:-<OTEL_EXTERNAL_ENDPOINT not set>}"
+        fi
 
   oss-up:
     desc: "Alias for OSS-only lab setup"
@@ -223,9 +233,13 @@ tasks:
       - task: secrets:langsmith
 
   secrets:keycloak-realm:
-    desc: "Create keycloak-realm Secret from the realm export JSON"
+    desc: "Create keycloak-realm Secret from the realm export JSON — only in local Keycloak mode"
     cmds:
       - |
+        if [ "${KEYCLOAK_MODE:-local}" != "local" ]; then
+          echo "→ KEYCLOAK_MODE=${KEYCLOAK_MODE}, skipping keycloak-realm secret (using ${KEYCLOAK_EXTERNAL_URL:-<KEYCLOAK_EXTERNAL_URL not set>})"
+          exit 0
+        fi
         kubectl create secret generic keycloak-realm \
           --namespace {{.NS_KEYCLOAK}} \
           --from-file=realm.json={{.APP_ROOT}}/keycloak/realm-export-ai-lab.json \
@@ -314,9 +328,13 @@ tasks:
           --wait
 
   helm:install-keycloak:
-    desc: "Install Keycloak via Helm (CloudPirates chart)"
+    desc: "Install Keycloak via Helm (CloudPirates chart) — only in local Keycloak mode"
     cmds:
       - |
+        if [ "${KEYCLOAK_MODE:-local}" != "local" ]; then
+          echo "→ KEYCLOAK_MODE=${KEYCLOAK_MODE}, skipping local Keycloak install (using ${KEYCLOAK_EXTERNAL_URL:-<KEYCLOAK_EXTERNAL_URL not set>})"
+          exit 0
+        fi
         helm upgrade --install keycloak oci://registry-1.docker.io/cloudpirates/keycloak \
           --namespace {{.NS_KEYCLOAK}} \
           -f {{.TASKFILE_DIR}}/helm/keycloak-values.yaml \
@@ -353,14 +371,29 @@ tasks:
       - |
         HOST_IP=$(docker network inspect bridge -f '{{`{{range .IPAM.Config}}{{.Gateway}}{{end}}`}}')
         echo "→ Ollama host IP: ${HOST_IP}"
+
+        if [ "${OBSERVABILITY_MODE:-local}" = "external" ]; then
+          OTEL_ENDPOINT="${OTEL_EXTERNAL_ENDPOINT:?Set OTEL_EXTERNAL_ENDPOINT in .env when OBSERVABILITY_MODE=external}"
+          echo "→ Observability: external (${OTEL_ENDPOINT})"
+        else
+          OTEL_ENDPOINT="http://otel-lgtm.otel-lgtm.svc.cluster.local:4318"
+          echo "→ Observability: local (otel-lgtm)"
+        fi
+
         for f in {{.TASKFILE_DIR}}/manifests/*.yaml; do
           BASE=$(basename "$f")
           if [ "${BASE}" = "metallb-config.yaml" ]; then
             continue
           elif [ "${BASE}" = "ollama.yaml" ]; then
             sed "s/__HOST_IP__/${HOST_IP}/" "$f" | kubectl apply -f -
+          elif [ "${BASE}" = "otel-lgtm.yaml" ]; then
+            if [ "${OBSERVABILITY_MODE:-local}" = "local" ]; then
+              kubectl apply -f "$f"
+            else
+              echo "  · skipping otel-lgtm.yaml (OBSERVABILITY_MODE=external)"
+            fi
           else
-            kubectl apply -f "$f"
+            sed "s#__OTEL_ENDPOINT__#${OTEL_ENDPOINT}#" "$f" | kubectl apply -f -
           fi
         done
 
@@ -386,8 +419,21 @@ tasks:
       - kubectl apply -f {{.TASKFILE_DIR}}/oss/agentgateway/
       - kubectl apply -f {{.TASKFILE_DIR}}/oss/kafka/
       - kubectl apply -f {{.TASKFILE_DIR}}/oss/litellm/
-      - kubectl apply -f {{.TASKFILE_DIR}}/oss/langgraph/
+      - task: oss:langgraph-manifests-apply
       - kubectl apply -f {{.TASKFILE_DIR}}/oss/routes/
+
+  oss:langgraph-manifests-apply:
+    desc: "Apply LangGraph manifests, substituting the OTEL endpoint per OBSERVABILITY_MODE"
+    cmds:
+      - |
+        if [ "${OBSERVABILITY_MODE:-local}" = "external" ]; then
+          OTEL_ENDPOINT="${OTEL_EXTERNAL_ENDPOINT:?Set OTEL_EXTERNAL_ENDPOINT in .env when OBSERVABILITY_MODE=external}"
+        else
+          OTEL_ENDPOINT="http://otel-lgtm.otel-lgtm.svc.cluster.local:4318"
+        fi
+        for f in {{.TASKFILE_DIR}}/oss/langgraph/*.yaml; do
+          sed "s#__OTEL_ENDPOINT__#${OTEL_ENDPOINT}#" "$f" | kubectl apply -f -
+        done
 
   oss:manifests-delete:
     desc: "Delete OSS gateway, LLM, direct Kafka, and LangGraph manifests"
@@ -407,7 +453,7 @@ tasks:
       - task: build:travel-destination-decision
       - task: build:travel-flight-finder
       - task: build:travel-flight-booker
-      - kubectl apply -f {{.TASKFILE_DIR}}/oss/langgraph/
+      - task: oss:langgraph-manifests-apply
       # imagePullPolicy: Never + :latest tags means `apply` alone won't pick up new code — restart explicitly.
       - kubectl rollout restart deploy/travel-orchestrator-langgraph -n {{.NS_TRAVEL_LANGGRAPH}}
       - kubectl rollout restart deploy/travel-destination -n {{.NS_TRAVEL_LANGGRAPH}}

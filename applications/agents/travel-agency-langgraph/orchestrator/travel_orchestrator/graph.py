@@ -31,13 +31,14 @@ from typing import Any, AsyncIterator
 
 import httpx
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
-from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.prebuilt import create_react_agent
 from langsmith.run_helpers import get_current_run_tree
 from pydantic import BaseModel, Field
-from psycopg_pool import ConnectionPool
+from psycopg_pool import AsyncConnectionPool
 
 logger = logging.getLogger(__name__)
 
@@ -92,14 +93,19 @@ class TripRequirements(BaseModel):
     )
 
 
+# LCEL chain: ChatPromptTemplate | llm.with_structured_output
+# The | operator wires prompt → model as a Runnable sequence.
+# ChatPromptTemplate formats the messages; with_structured_output parses the response into TripRequirements.
+REQUIREMENTS_CHAIN_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", "Extract structured trip requirements from the traveller's request below."),
+    ("human", "{input}"),
+])
+
+
 def extract_requirements(prompt: str, llm: ChatOpenAI) -> dict[str, Any]:
-    """Extract structured trip requirements from a free-text prompt via an LLM call."""
-    structured_llm = llm.with_structured_output(TripRequirements)
-    messages = [
-        SystemMessage(content="Extract structured trip requirements from the traveller's request below."),
-        HumanMessage(content=prompt.strip()),
-    ]
-    requirements: TripRequirements = structured_llm.invoke(messages)
+    """Extract structured trip requirements via an LCEL chain: prompt | llm with structured output."""
+    chain = REQUIREMENTS_CHAIN_PROMPT | llm.with_structured_output(TripRequirements)
+    requirements: TripRequirements = chain.invoke({"input": prompt.strip()})
     return requirements.model_dump()
 
 
@@ -201,11 +207,11 @@ user clarifying questions — infer sensible defaults and proceed autonomously."
 # Agent — LangGraph prebuilt ReAct agent, replaces the hand-authored StateGraph
 # ---------------------------------------------------------------------------
 
-_pool: ConnectionPool | None = None
+_pool: AsyncConnectionPool | None = None
 _agent = None
 
 
-def build_checkpointer():
+async def build_checkpointer():
     """A Postgres-backed checkpointer for cross-request conversation memory.
 
     Falls back to no checkpointer (stateless runs) if Postgres isn't reachable,
@@ -213,32 +219,36 @@ def build_checkpointer():
     """
     global _pool
     try:
-        _pool = ConnectionPool(conninfo=CHECKPOINT_DB_URL, max_size=10, kwargs={"autocommit": True, "prepare_threshold": 0})
-        checkpointer = PostgresSaver(_pool)
-        checkpointer.setup()
+        _pool = AsyncConnectionPool(
+            conninfo=CHECKPOINT_DB_URL, max_size=10, open=False,
+            kwargs={"autocommit": True, "prepare_threshold": 0},
+        )
+        await _pool.open()
+        checkpointer = AsyncPostgresSaver(_pool)
+        await checkpointer.setup()
         return checkpointer
     except Exception:
         logger.warning("Postgres checkpointer unavailable at %s — falling back to stateless runs", CHECKPOINT_DB_URL, exc_info=True)
         return None
 
 
-def build_agent():
+async def build_agent():
     llm = build_llm()
-    checkpointer = build_checkpointer()
+    checkpointer = await build_checkpointer()
     return create_react_agent(llm, TOOLS, prompt=SYSTEM_PROMPT, checkpointer=checkpointer)
 
 
-def get_agent():
+async def get_agent():
     global _agent
     if _agent is None:
-        _agent = build_agent()
+        _agent = await build_agent()
     return _agent
 
 
 async def run_agent(prompt: str, thread_id: str) -> dict[str, Any]:
     """Extract requirements, run the agent to completion, and shape a backward-compatible result dict."""
     requirements = extract_requirements(prompt, build_llm())
-    agent = get_agent()
+    agent = await get_agent()
     initial_message = HumanMessage(content=json.dumps({"trip_request": prompt, "requirements": requirements}))
     config = {"configurable": {"thread_id": thread_id}}
     result = await agent.ainvoke({"messages": [initial_message]}, config=config)
@@ -248,7 +258,7 @@ async def run_agent(prompt: str, thread_id: str) -> dict[str, Any]:
 async def stream_agent(prompt: str, thread_id: str) -> AsyncIterator[dict[str, Any]]:
     """Stream agent execution events (token chunks, tool start/end) for a single trip-planning run."""
     requirements = extract_requirements(prompt, build_llm())
-    agent = get_agent()
+    agent = await get_agent()
     initial_message = HumanMessage(content=json.dumps({"trip_request": prompt, "requirements": requirements}))
     config = {"configurable": {"thread_id": thread_id}}
     async for event in agent.astream_events({"messages": [initial_message]}, config=config, version="v2"):

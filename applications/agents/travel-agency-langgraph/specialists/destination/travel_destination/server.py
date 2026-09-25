@@ -1,52 +1,70 @@
 """
-Destination specialist — RAG-backed wrapper around the destinations REST API.
+Destination specialist — shortlists travel destinations via the MCP destinations adapter.
 
 Receives: {"vibes": [...], "budget_level": "high", "activities": [...], "limit": 5, "origin": "AMS"}
 Returns:  {"destinations": [...]}
 
-On startup, fetches the full destination catalog from the REST API and embeds it into an
-in-memory FAISS index. Embeddings are computed via the in-cluster LiteLLM proxy (OpenAI
-text-embedding-3-small by default) rather than a local model — no local ML runtime, so this
-service stays as lightweight as the other specialists. Each request synthesizes a
-natural-language query from the requested vibes/budget/activities and runs a semantic
-similarity search over the catalog, then applies the same hard guardrails the old tag-matching
-version enforced (exact budget match, exclude the origin airport) as a post-filter before
-truncating to the requested limit.
+Calls the destinations MCP adapter through agentgateway using MultiServerMCPClient.
+Tools are discovered via tools/list at startup; the list_destinations tool filters by
+vibes/budget/activities server-side (keyword match). The origin airport is excluded
+post-filter, and the remaining candidates are then semantically re-ranked against the
+trip request using OpenAI embeddings (via LiteLLM's `embedding-openai` alias).
 """
 
 import json
+import logging
+import math
 import os
 import uuid
 from contextlib import asynccontextmanager
 from typing import Any
 
-import httpx
 import uvicorn
 from fastapi import FastAPI, Request
-from langchain_community.vectorstores import FAISS
-from langchain_core.documents import Document
+from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_openai import OpenAIEmbeddings
+from .otel import setup_otel
+
+setup_otel("travel-destination")
 from langsmith import traceable
 from langsmith.run_helpers import tracing_context
 from pydantic import BaseModel, Field
 
-API_BASE_URL    = os.getenv("API_BASE_URL", "http://traefik.traefik.svc.cluster.local")
-API_HOST_HEADER = os.getenv("API_HOST_HEADER", "traefik-api-gw.lab")
-AGENT_NAME      = os.getenv("AGENT_NAME", "travel-destination")
+logger = logging.getLogger(__name__)
+
+AGENTGATEWAY_URL      = os.getenv("AGENTGATEWAY_URL", "http://agentgateway.lab")
+AGENT_NAME            = os.getenv("AGENT_NAME", "travel-destination")
 PUBLIC_AGENT_BASE_URL = os.getenv("PUBLIC_AGENT_BASE_URL", "http://agentgateway.lab/a2a/destination")
 
-LITELLM_BASE_URL      = os.getenv("LITELLM_BASE_URL", "http://litellm.litellm.svc.cluster.local:4000/v1")
-LITELLM_API_KEY       = os.getenv("LITELLM_API_KEY", "sk-ai-lab-litellm")
+LITELLM_BASE_URL        = os.getenv("LITELLM_BASE_URL", "http://litellm.litellm.svc.cluster.local:4000/v1")
+LITELLM_API_KEY         = os.getenv("LITELLM_API_KEY", "sk-ai-lab-litellm")
 LITELLM_EMBEDDING_MODEL = os.getenv("LITELLM_EMBEDDING_MODEL", "embedding-openai")
-CATALOG_FETCH_LIMIT   = int(os.getenv("CATALOG_FETCH_LIMIT", "500"))
 
-_vectorstore: FAISS | None = None
+_embeddings: OpenAIEmbeddings | None = None
+
+
+def get_embeddings() -> OpenAIEmbeddings:
+    """A LangChain embeddings client pointed at the in-cluster LiteLLM proxy."""
+    global _embeddings
+    if _embeddings is None:
+        _embeddings = OpenAIEmbeddings(base_url=LITELLM_BASE_URL, api_key=LITELLM_API_KEY, model=LITELLM_EMBEDDING_MODEL)
+    return _embeddings
+
+
+_mcp_client: MultiServerMCPClient | None = None
+_tools: list = []
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _vectorstore
-    _vectorstore = build_vectorstore()
+    global _mcp_client, _tools
+    _mcp_client = MultiServerMCPClient({
+        "destinations": {
+            "url": f"{AGENTGATEWAY_URL}/mcp-destinations",
+            "transport": "streamable_http",
+        }
+    })
+    _tools = await _mcp_client.get_tools()
     yield
 
 
@@ -71,20 +89,20 @@ def agent_card() -> dict[str, Any]:
     return {
         "name": AGENT_NAME,
         "description": "Returns a shortlist of travel destinations matching vibes, budget, and activities "
-                       "via semantic search over the destination catalog.",
+                       "via MCP tool calls to the destinations adapter.",
         "url": PUBLIC_AGENT_BASE_URL,
-        "version": "0.2.0",
+        "version": "0.3.0",
         "capabilities": {"streaming": False, "pushNotifications": False},
-        "skills": [{"id": "shortlist-destinations", "name": "Shortlist destinations", "tags": ["travel", "destinations", "rag"]}],
+        "skills": [{"id": "shortlist-destinations", "name": "Shortlist destinations", "tags": ["travel", "destinations", "mcp"]}],
     }
 
 
 @app.post("/a2a/jsonrpc")
 @app.post("/a2a/destination/a2a/jsonrpc")
-def jsonrpc(request: JsonRpcRequest, http_request: Request) -> dict[str, Any]:
+async def jsonrpc(request: JsonRpcRequest, http_request: Request) -> dict[str, Any]:
     payload = extract_json(request.params or {})
     with tracing_context(parent=dict(http_request.headers)):
-        result = get_destinations(payload)
+        result = await get_destinations(payload)
     return {
         "jsonrpc": "2.0",
         "id": request.id,
@@ -96,69 +114,93 @@ def jsonrpc(request: JsonRpcRequest, http_request: Request) -> dict[str, Any]:
     }
 
 
-def fetch_catalog() -> list[dict[str, Any]]:
-    response = httpx.get(
-        f"{API_BASE_URL}/destinations/v1/destinations",
-        params={"limit": CATALOG_FETCH_LIMIT},
-        headers={"host": API_HOST_HEADER},
-        timeout=10.0,
-    )
-    response.raise_for_status()
-    return response.json().get("destinations", [])
-
-
-def render_destination(d: dict[str, Any]) -> str:
-    return (
-        f"{d.get('name')}, {d.get('country')} ({d.get('region')}). "
-        f"Budget: {d.get('budget_level')}. Vibes: {', '.join(d.get('vibes', []))}. "
-        f"Activities: {', '.join(d.get('activities', []))}. {d.get('blurb', '')}"
-    )
-
-
-def build_vectorstore() -> "FAISS | None":
-    try:
-        catalog = fetch_catalog()
-    except Exception:
-        return None
-    if not catalog:
-        return None
-    embeddings = OpenAIEmbeddings(base_url=LITELLM_BASE_URL, api_key=LITELLM_API_KEY, model=LITELLM_EMBEDDING_MODEL)
-    documents = [Document(page_content=render_destination(d), metadata=d) for d in catalog]
-    return FAISS.from_documents(documents, embeddings)
-
-
 @traceable(name="get_destinations")
-def get_destinations(payload: dict[str, Any]) -> dict[str, Any]:
+async def get_destinations(payload: dict[str, Any]) -> dict[str, Any]:
     origin     = payload.get("origin", "")
     budget     = payload.get("budget_level", "high")
     vibes      = payload.get("vibes", [])
     activities = payload.get("activities", [])
-    limit      = payload.get("limit", 5)
+    limit      = int(payload.get("limit", 5))
 
+    tool = next((t for t in _tools if t.name == "list_destinations"), None)
+    if tool is None:
+        return {"destinations": []}
+
+    raw = await tool.ainvoke({
+        "vibes": vibes,
+        "budget_level": budget,
+        "activities": activities,
+        "limit": limit * 8,  # fetch a wider pool so semantic re-ranking has something to work with
+    })
+    data = _parse(raw)
+    candidates = [
+        d for d in data.get("destinations", [])
+        if origin not in d.get("airport_iata_codes", [])
+    ]
+    destinations = await rank_by_similarity(candidates, vibes, activities, budget)
+    return {"destinations": destinations[:limit]}
+
+
+@traceable(name="rank_by_similarity")
+async def rank_by_similarity(
+    candidates: list[dict[str, Any]], vibes: list[str], activities: list[str], budget: str,
+) -> list[dict[str, Any]]:
+    """Re-rank keyword-filtered candidates by embedding similarity to the trip request.
+
+    Falls back to the incoming (keyword-filtered) order if LiteLLM's embedding endpoint is
+    unreachable, so a down embedding model degrades ranking quality rather than the request.
+    """
+    if len(candidates) <= 1:
+        return candidates
     query = (
-        f"A trip with a {budget} budget, vibes: {', '.join(vibes) or 'any'}, "
-        f"activities: {', '.join(activities) or 'any'}."
+        f"A {budget}-budget trip with vibes: {', '.join(vibes) or 'any'}. "
+        f"Preferred activities: {', '.join(activities) or 'any'}."
     )
+    try:
+        embeddings = get_embeddings()
+        query_vector = await embeddings.aembed_query(query)
+        document_vectors = await embeddings.aembed_documents([_destination_text(d) for d in candidates])
+    except Exception:
+        logger.warning("embedding-based ranking unavailable, falling back to keyword-filter order", exc_info=True)
+        return candidates
+    ranked = sorted(
+        zip(candidates, document_vectors), key=lambda pair: _cosine_similarity(query_vector, pair[1]), reverse=True,
+    )
+    return [destination for destination, _ in ranked]
 
-    if _vectorstore is not None:
-        hits = _vectorstore.similarity_search(query, k=max(limit * 4, 20))
-        candidates = [hit.metadata for hit in hits]
-    else:
-        candidates = fetch_catalog()
 
-    destinations = [
-        d for d in candidates
-        if d.get("budget_level") == budget and origin not in d.get("airport_iata_codes", [])
-    ][:limit]
-    return {"destinations": destinations}
+def _destination_text(d: dict[str, Any]) -> str:
+    return ", ".join(filter(None, [
+        d.get("name"), d.get("country"), d.get("blurb"),
+        "vibes: " + "/".join(d.get("vibes", [])),
+        "activities: " + "/".join(d.get("activities", [])),
+    ]))
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(y * y for y in b))
+    return dot / (norm_a * norm_b) if norm_a and norm_b else 0.0
+
+
+def _parse(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, list) and raw and isinstance(raw[0], dict) and "text" in raw[0]:
+        raw = raw[0]["text"]
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except (ValueError, TypeError):
+            pass
+    return {}
 
 
 def extract_json(params: dict[str, Any]) -> dict[str, Any]:
-    """Pull the JSON payload out of the A2A message text field."""
     message = params.get("message")
     if isinstance(message, dict):
-        parts = message.get("parts", [])
-        for part in parts:
+        for part in message.get("parts", []):
             if isinstance(part, dict) and part.get("kind") == "text":
                 return json.loads(part["text"])
     return {}
