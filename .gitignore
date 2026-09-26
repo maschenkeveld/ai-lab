@@ -22,3 +22,5 @@ tls/dp-llm.crt
 tls/dp-llm.key
 tls/dp-mcp.crt
 tls/dp-mcp.key
+.venv/
+__pycache__/
