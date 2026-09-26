@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "applications/**"
+      - "!applications/agents/travel-agency-langgraph/evals/**"
       - ".github/workflows/build-images.yml"
   workflow_dispatch: {}
 
