@@ -26,3 +26,6 @@ tls/dp-mcp.key
 __pycache__/
 *.pyc
 *.egg-info/
+
+# Local-only presentation deck — not meant to be pushed
+docs/presentation-deck.md
