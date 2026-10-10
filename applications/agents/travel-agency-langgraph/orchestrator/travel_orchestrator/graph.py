@@ -19,8 +19,18 @@ run (and, via header propagation in call_specialist, the specialist calls it mak
 when LANGCHAIN_TRACING_V2=true and LANGCHAIN_API_KEY are set.
 
 Conversation state (including which destinations have been tried) is persisted per
-`thread_id` in Postgres via PostgresSaver, so a caller can continue a trip-planning
-conversation across multiple /plan calls.
+`thread_id` in Postgres via AsyncPostgresSaver, not in pod-local memory — so the
+orchestrator's compute is horizontally scalable (any replica can serve any request) while
+conversation state lives externally in Postgres (IMPROVEMENTS.md §17).
+
+Unresolved issue, stated plainly rather than hidden: there is no session affinity /
+distributed locking around a given `thread_id`. Two concurrent requests for the same
+`thread_id` hitting two different replicas can both read the same checkpoint and then race
+to write the next one — the checkpointer makes state external, it does not by itself make
+concurrent access to one thread_id safe. This is why the production-style GitOps deployment
+currently keeps this service at a single replica rather than scaling it blindly; scaling it
+for real would need either sticky routing on thread_id at the gateway or per-thread locking
+at the application level, neither of which exists today.
 """
 
 import json
@@ -30,15 +40,16 @@ import uuid
 from typing import Any, AsyncIterator
 
 import httpx
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain.agents import create_agent
+from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-from langgraph.prebuilt import create_react_agent
+from langsmith import traceable
 from langsmith.run_helpers import get_current_run_tree
-from pydantic import BaseModel, Field
 from psycopg_pool import AsyncConnectionPool
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +73,19 @@ CHECKPOINT_DB_URL = os.getenv(
     "CHECKPOINT_DB_URL",
     "postgresql://postgres:postgres@postgres.llm-analytics.svc.cluster.local:5432/llm_analytics?sslmode=disable",
 )
+
+# Trace/run metadata (LangSmith §5): lets a trace or an eval experiment be tied
+# back to a specific build and deployment target without grepping logs.
+APP_VERSION = os.getenv("APP_VERSION", "dev")
+ENVIRONMENT = os.getenv("ENVIRONMENT", "local")
+SERVICE_NAME = "travel-orchestrator"
+RUN_METADATA = {
+    "service_name": SERVICE_NAME,
+    "agent_name": SERVICE_NAME,
+    "model_alias": LITELLM_MODEL,
+    "app_version": APP_VERSION,
+    "environment": ENVIRONMENT,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +126,7 @@ REQUIREMENTS_CHAIN_PROMPT = ChatPromptTemplate.from_messages([
 ])
 
 
+@traceable(name="extract_trip_requirements", run_type="chain")
 def extract_requirements(prompt: str, llm: ChatOpenAI) -> dict[str, Any]:
     """Extract structured trip requirements via an LCEL chain: prompt | llm with structured output."""
     chain = REQUIREMENTS_CHAIN_PROMPT | llm.with_structured_output(TripRequirements)
@@ -159,8 +184,12 @@ def find_flight(origin: str, to_iata: str, date: str) -> str:
     """
     try:
         result = call_specialist(SPECIALIST_FLIGHT_FINDER, {"origin": origin, "to_iata": to_iata, "date": date})
-    except Exception:
-        result = {"flight": None}
+    except httpx.HTTPError:
+        # Distinguish "the flight-finder backend itself is unreachable" from "it answered and
+        # found no route" (IMPROVEMENTS.md §15) — same {"flight": null} shape so the agent's
+        # existing retry logic is unaffected, but the extra "error" key lets tool_calls/traces
+        # (and future evaluators) tell the two apart instead of treating every failure alike.
+        result = {"flight": None, "error": "backend_unavailable"}
     return json.dumps(result)
 
 
@@ -204,7 +233,10 @@ user clarifying questions — infer sensible defaults and proceed autonomously."
 
 
 # ---------------------------------------------------------------------------
-# Agent — LangGraph prebuilt ReAct agent, replaces the hand-authored StateGraph
+# Agent — built via langchain.agents.create_agent (LangChain v1), not a
+# hand-authored StateGraph. Still runs on LangGraph under the hood (same
+# CompiledStateGraph runtime create_react_agent returned), so .ainvoke()/
+# .astream_events() and the Postgres checkpointer behave identically.
 # ---------------------------------------------------------------------------
 
 _pool: AsyncConnectionPool | None = None
@@ -235,7 +267,9 @@ async def build_checkpointer():
 async def build_agent():
     llm = build_llm()
     checkpointer = await build_checkpointer()
-    return create_react_agent(llm, TOOLS, prompt=SYSTEM_PROMPT, checkpointer=checkpointer)
+    # name= gives this agent's run a meaningful LangSmith trace root instead of
+    # the library's generic default (LangSmith §5 — avoid invoke/run/function names).
+    return create_agent(llm, TOOLS, system_prompt=SYSTEM_PROMPT, checkpointer=checkpointer, name=SERVICE_NAME)
 
 
 async def get_agent():
@@ -245,13 +279,22 @@ async def get_agent():
     return _agent
 
 
+def _run_config(thread_id: str) -> dict[str, Any]:
+    """Shared RunnableConfig for a single trip-planning run: thread_id for checkpointing,
+    plus the metadata LangSmith attaches to the resulting trace (LangSmith §5)."""
+    return {
+        "configurable": {"thread_id": thread_id},
+        "metadata": {**RUN_METADATA, "thread_id": thread_id},
+        "run_name": SERVICE_NAME,
+    }
+
+
 async def run_agent(prompt: str, thread_id: str) -> dict[str, Any]:
     """Extract requirements, run the agent to completion, and shape a backward-compatible result dict."""
     requirements = extract_requirements(prompt, build_llm())
     agent = await get_agent()
     initial_message = HumanMessage(content=json.dumps({"trip_request": prompt, "requirements": requirements}))
-    config = {"configurable": {"thread_id": thread_id}}
-    result = await agent.ainvoke({"messages": [initial_message]}, config=config)
+    result = await agent.ainvoke({"messages": [initial_message]}, config=_run_config(thread_id))
     return summarize_result(result, requirements)
 
 
@@ -260,22 +303,28 @@ async def stream_agent(prompt: str, thread_id: str) -> AsyncIterator[dict[str, A
     requirements = extract_requirements(prompt, build_llm())
     agent = await get_agent()
     initial_message = HumanMessage(content=json.dumps({"trip_request": prompt, "requirements": requirements}))
-    config = {"configurable": {"thread_id": thread_id}}
-    async for event in agent.astream_events({"messages": [initial_message]}, config=config, version="v2"):
+    async for event in agent.astream_events({"messages": [initial_message]}, config=_run_config(thread_id), version="v2"):
         yield event
 
 
 def summarize_result(result: dict[str, Any], requirements: dict[str, Any]) -> dict[str, Any]:
-    """Pull the final answer plus each tool's last result out of the agent's message history."""
+    """Pull the final answer, each tool's last result, and the tool-call sequence out of the
+    agent's message history (IMPROVEMENTS.md §14: a structured result alongside the prose
+    answer, so callers - including the eval harness - don't have to re-derive outcome/sequence
+    from free text)."""
     messages = result.get("messages") or []
     answer = messages[-1].content if messages else ""
     shortlist = selected_destination = flight = booking = None
+    tool_calls: list[dict[str, Any]] = []
     for message in messages:
         if not isinstance(message, ToolMessage):
             continue
         try:
             payload = json.loads(message.content)
         except (TypeError, ValueError):
+            payload = None
+        tool_calls.append({"tool": message.name, "output": payload})
+        if payload is None:
             continue
         if message.name == "get_destination_shortlist":
             shortlist = payload.get("destinations")
@@ -285,6 +334,7 @@ def summarize_result(result: dict[str, Any], requirements: dict[str, Any]) -> di
             flight = payload.get("flight")
         elif message.name == "book_flight":
             booking = payload.get("booking")
+    status = "booked" if booking is not None else ("no_flight" if shortlist is not None else "failed")
     return {
         "answer": answer,
         "requirements": requirements,
@@ -292,6 +342,8 @@ def summarize_result(result: dict[str, Any], requirements: dict[str, Any]) -> di
         "selected_destination": selected_destination,
         "flight": flight,
         "booking": booking,
+        "status": status,
+        "tool_calls": tool_calls,
     }
 
 

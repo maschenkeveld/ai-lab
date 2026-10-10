@@ -68,7 +68,19 @@ async def jsonrpc(request: JsonRpcRequest) -> dict[str, Any]:
             "messageId": str(uuid.uuid4()),
             "role": "agent",
             "parts": [{"kind": "text", "text": result["answer"]}],
-            "metadata": {"thread_id": thread_id},
+            # Structured outcome alongside the prose answer (IMPROVEMENTS.md §14) - lets
+            # callers (the eval harness in particular) check status/sequence/requirements
+            # without re-parsing free text.
+            "metadata": {
+                "thread_id": thread_id,
+                "status": result["status"],
+                "requirements": result["requirements"],
+                "shortlist": result["shortlist"],
+                "selected_destination": result["selected_destination"],
+                "flight": result["flight"],
+                "booking": result["booking"],
+                "tool_calls": result["tool_calls"],
+            },
         },
     }
 
