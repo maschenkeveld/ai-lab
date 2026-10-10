@@ -257,17 +257,26 @@ async def build_checkpointer():
     so the agent still works in environments without the llm-analytics Postgres.
     """
     global _pool
+    pool = AsyncConnectionPool(
+        conninfo=CHECKPOINT_DB_URL, max_size=10, open=False,
+        kwargs={"autocommit": True, "prepare_threshold": 0},
+    )
     try:
-        _pool = AsyncConnectionPool(
-            conninfo=CHECKPOINT_DB_URL, max_size=10, open=False,
-            kwargs={"autocommit": True, "prepare_threshold": 0},
-        )
-        await _pool.open()
-        checkpointer = AsyncPostgresSaver(_pool)
+        # wait=True makes this actually attempt a connection and raise on failure (bad
+        # credentials, unreachable host) within `timeout` seconds. The previous
+        # fire-and-forget `await pool.open()` (wait=False, the default) returned
+        # successfully regardless of whether Postgres was reachable at all, leaving the
+        # pool's background workers retrying a doomed connection forever - confirmed live,
+        # this didn't just silently no-op: the endless retry churn built up enough resource
+        # pressure under real request load to get this pod OOM/SIGKilled outright.
+        await pool.open(wait=True, timeout=10)
+        checkpointer = AsyncPostgresSaver(pool)
         await checkpointer.setup()
+        _pool = pool
         return checkpointer
     except Exception:
         logger.warning("Postgres checkpointer unavailable at %s — falling back to stateless runs", CHECKPOINT_DB_URL, exc_info=True)
+        await pool.close()
         return None
 
 
