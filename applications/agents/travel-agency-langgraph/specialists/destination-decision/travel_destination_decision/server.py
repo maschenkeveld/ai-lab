@@ -11,6 +11,14 @@ no LLM call required.
 Set DICE_ROLL_DETERMINISTIC=true to always pick the first untried candidate instead (no
 dice roll, no MCP call) — used for reproducible regression evals that need to control
 which destination gets tried first. Normal/production deployments leave this unset.
+
+Worth noting if you're reading this right after graph.py or destination/server.py: there's
+no LLM and no "agent" anywhere in this file. The orchestrator's agent decided *to call*
+pick_destination (that decision was reasoning); what happens inside this service once it's
+called is pure deterministic/random Python — rolling a die and indexing into a list. Not
+every specialist in a multi-agent system needs to itself be "an agent"; this one is a plain
+function with a side effect (an MCP call for the dice roll) that the orchestrator's agent
+treats as a black box, same as it would treat any other tool.
 """
 
 import json
@@ -127,7 +135,11 @@ async def pick_destination(payload: dict[str, Any]) -> dict[str, Any]:
             logger.info("[destination-decision] only one candidate (or deterministic): %s", selected.get("name"))
         return {"selected_destination": selected}
 
-    # Roll D20 via MCP — result is 1..20; map to a candidate index.
+    # Roll D20 via MCP — result is 1..20; map to a candidate index. `_tools` was populated
+    # once at startup by lifespan() (same pattern as destination/server.py's MCP client
+    # setup — see that file for the fuller explanation of tools/list and MultiServerMCPClient).
+    # "20" in t.name is a loose match against whatever the dice-roller MCP server calls its
+    # d20 tool, rather than hardcoding an exact name.
     roll_tool = next((t for t in _tools if "20" in t.name), None)
     roll_result = 1
     if roll_tool is not None:

@@ -9,6 +9,26 @@ Tools are discovered via tools/list at startup; the list_destinations tool filte
 vibes/budget/activities server-side (keyword match). The origin airport is excluded
 post-filter, and the remaining candidates are then semantically re-ranked against the
 trip request using OpenAI embeddings (via LiteLLM's `embedding-openai` alias).
+
+=====================================================================================
+HOW THIS DIFFERS FROM THE ORCHESTRATOR (if you've just read graph.py)
+=====================================================================================
+The orchestrator is an *agent*: an LLM decides which tools to call and when. This service
+is not an agent at all — it's a plain FastAPI endpoint that always does the same fixed
+sequence of steps (call one MCP tool, filter, re-rank, return). The orchestrator calls this
+service as if it were a tool (see get_destination_shortlist in graph.py), but nothing in
+*this* file makes any decisions with an LLM about control flow — the only LLM-ish thing here
+is rank_by_similarity's use of embeddings, which is a similarity calculation, not reasoning.
+
+MCP (Model Context Protocol) is the piece that *is* shared conceptually with the
+orchestrator's tools, just one layer lower: where the orchestrator exposes Python functions
+to an LLM via @tool, this service discovers *someone else's* tools (the destinations MCP
+adapter, a separate process) over a network protocol, via MultiServerMCPClient, and calls
+them the same way you'd call a local function. tools/list is MCP's way of saying "ask the
+server what tools it has"; that happens once at startup (see lifespan() below), not on every
+request — swapping in a different MCP server would require no code changes here, only a
+different tools/list response to adapt to.
+=====================================================================================
 """
 
 import json
@@ -62,6 +82,16 @@ _tools: list = []
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """FastAPI runs this once at startup (everything before `yield`) and once at shutdown
+    (anything after it — nothing here). MultiServerMCPClient is handed a dict of named MCP
+    servers to connect to (just one, "destinations", here — the name is only a local label);
+    `transport: streamable_http` means it talks MCP over plain HTTP requests, the same
+    transport flavor the other three specialists use for their own MCP server. get_tools()
+    is the actual tools/list round-trip: it asks the destinations MCP adapter what tools it
+    exposes and returns LangChain-compatible tool objects for each one — here, that's just
+    `list_destinations`, looked up by name in get_destinations() below. Doing this once at
+    startup (not per-request) is why _tools is a module-level global instead of being
+    rebuilt inside the request handler."""
     global _mcp_client, _tools
     _mcp_client = MultiServerMCPClient({
         "destinations": {
@@ -105,6 +135,11 @@ def agent_card() -> dict[str, Any]:
 @app.post("/a2a/jsonrpc")
 @app.post("/a2a/destination/a2a/jsonrpc")
 async def jsonrpc(request: JsonRpcRequest, http_request: Request) -> dict[str, Any]:
+    # tracing_context(parent=...) is the receiving half of the trace-propagation pair
+    # described in graph.py's call_specialist: the orchestrator attached its current
+    # LangSmith trace's identity as HTTP headers before calling us, and this reads those
+    # headers back out so get_destinations' @traceable span (below) nests *underneath* the
+    # orchestrator's run in LangSmith, instead of starting its own disconnected trace.
     payload = extract_json(request.params or {})
     with tracing_context(parent=dict(http_request.headers)):
         result = await get_destinations(payload)
@@ -130,6 +165,10 @@ async def get_destinations(payload: dict[str, Any]) -> dict[str, Any]:
     if VERBOSE:
         logger.info("[destination] shortlisting: origin=%s budget=%s vibes=%s activities=%s", origin, budget, vibes, activities)
 
+    # _tools was populated once at startup by lifespan() above. tool.ainvoke(...) actually
+    # makes the network call to the destinations MCP server and returns whatever it replies
+    # with — conceptually identical to how the orchestrator's agent loop invokes a @tool
+    # function, except here *we* decide to call it (fixed code path), not an LLM.
     tool = next((t for t in _tools if t.name == "list_destinations"), None)
     if tool is None:
         return {"destinations": []}

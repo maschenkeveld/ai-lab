@@ -6,6 +6,10 @@ Returns:  {"flight": {...}} on success, or {"flight": null} if none found.
 
 The null response signals the orchestrator's retry loop to try a different destination.
 Calls the flights MCP adapter through agentgateway using MultiServerMCPClient.
+
+Same MCP-client-at-startup pattern as destination/server.py (see that file for the fuller
+explanation of lifespan()/MultiServerMCPClient/tools/list) — this service just exposes one
+MCP tool, `flight_price`, instead of filtering/re-ranking a list.
 """
 
 import json

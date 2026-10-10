@@ -5,6 +5,13 @@ Receives: {"passenger_name": "Maarten", "from": "AMS", "to": "BCN", "date": "202
 Returns:  {"booking": {...}}
 
 Calls the book-flights MCP adapter through agentgateway using MultiServerMCPClient.
+
+Same MCP-client-at-startup pattern as destination/server.py (see that file for the fuller
+explanation of lifespan()/MultiServerMCPClient/tools/list). Worth knowing when reading this
+alongside graph.py: *this* service has no idea the orchestrator paused for human approval
+before calling it — by the time a request reaches book_flight() here, that decision has
+already been made. The interrupt()/approval mechanism lives entirely in the orchestrator;
+this specialist only ever sees "do the booking now," never "ask a human first."
 """
 
 import json

@@ -9,7 +9,7 @@ Flow (enforced by SYSTEM_PROMPT, not by graph topology):
         pick_destination           (destination-decision specialist; retried with
                                      growing tried_iata_codes if find_flight fails)
         find_flight                (flight-finder specialist; None on failure)
-        book_flight                (flight-booker specialist)
+        book_flight                (flight-booker specialist; pauses for human approval)
     → final answer message
 
 Each tool sends an A2A JSON-RPC request to a specialist service via agentgateway.
@@ -31,6 +31,32 @@ concurrent access to one thread_id safe. This is why the production-style GitOps
 currently keeps this service at a single replica rather than scaling it blindly; scaling it
 for real would need either sticky routing on thread_id at the gateway or per-thread locking
 at the application level, neither of which exists today.
+
+=====================================================================================
+READING GUIDE FOR LEARNING THE AGENTIC PARTS OF THIS FILE
+=====================================================================================
+If you're new to LangChain/LangGraph, the "agentic" machinery in this file boils down to
+four ideas, each explained in depth at its definition below:
+
+1. A *tool* (the @tool decorator) is just a normal Python function the LLM is allowed to
+   call. The LLM never runs the function itself — it decides to call it, LangGraph runs it,
+   and the return value goes back into the conversation as a new message.
+
+2. create_agent() builds a loop (technically a small LangGraph state machine, though you
+   never see its nodes/edges) that alternates between "ask the LLM what to do next" and
+   "run whatever tool it asked for" until the LLM stops calling tools and just replies.
+   This is the classic "ReAct" pattern (Reason + Act), and it's why there's no hand-written
+   if/else control flow for the booking process — the SYSTEM_PROMPT is the control flow,
+   and the LLM is the thing executing it, one tool call at a time.
+
+3. A *checkpointer* is what lets that loop be paused and resumed across separate HTTP
+   requests. Every step of the loop gets saved, keyed by a thread_id you choose, so calling
+   the agent again later with the same thread_id continues exactly where it left off.
+
+4. interrupt() is a special way to pause the loop *in the middle of a tool call* and wait
+   for an external decision (a human, in this case) before continuing. It only works because
+   of #3 — without a checkpointer, there's nowhere to save the paused state.
+=====================================================================================
 """
 
 import json
@@ -59,6 +85,11 @@ logger = logging.getLogger(__name__)
 
 
 # Specialist A2A base URLs — routed through agentgateway so traffic is observable/proxied.
+# "A2A" (Agent-to-Agent) here just means: one agent service calls another over plain HTTP
+# using a JSON-RPC envelope, the same way you'd call any REST API — there's no special
+# LangChain transport involved. The orchestrator doesn't import or run the specialists'
+# code directly; it sends them a JSON payload and reads back a JSON response (see
+# call_specialist at the bottom of this file).
 AGENTGATEWAY_URL = os.getenv("AGENTGATEWAY_URL", "http://agentgateway.lab")
 SPECIALIST_DESTINATION          = os.getenv("SPECIALIST_DESTINATION",          f"{AGENTGATEWAY_URL}/a2a/destination")
 SPECIALIST_DESTINATION_DECISION = os.getenv("SPECIALIST_DESTINATION_DECISION", f"{AGENTGATEWAY_URL}/a2a/destination-decision")
@@ -69,6 +100,11 @@ DEFAULT_PASSENGER = os.getenv("DEFAULT_PASSENGER", "Maarten")
 DEFAULT_ORIGIN    = os.getenv("DEFAULT_ORIGIN", "AMS")
 DEFAULT_DATE      = os.getenv("DEFAULT_TRAVEL_DATE", "2026-07-15")
 
+# LiteLLM is a model-routing proxy: the agent always talks to "an OpenAI-compatible API",
+# and LiteLLM decides which real provider/model sits behind the alias in LITELLM_MODEL
+# (e.g. "openai-gpt" -> gpt-4o-mini, "gemini-pro" -> gemini-2.5-pro). This is what let us
+# swap models for the baseline-vs-candidate experiment by changing one env var, with zero
+# code changes — the agent code never hardcodes a specific model provider.
 LITELLM_BASE_URL = os.getenv("LITELLM_BASE_URL", "http://litellm.litellm.svc.cluster.local:4000/v1")
 LITELLM_API_KEY  = os.getenv("LITELLM_API_KEY", "sk-ai-lab-litellm")
 LITELLM_MODEL    = os.getenv("LITELLM_MODEL", "openai-gpt")
@@ -97,7 +133,15 @@ RUN_METADATA = {
 # ---------------------------------------------------------------------------
 
 def build_llm() -> ChatOpenAI:
-    """A LangChain chat model pointed at the in-cluster LiteLLM proxy."""
+    """A LangChain chat model pointed at the in-cluster LiteLLM proxy.
+
+    ChatOpenAI is LangChain's wrapper around "any API that speaks the OpenAI chat-completions
+    protocol" — it's not tied to OpenAI specifically, which is exactly why pointing base_url
+    at LiteLLM instead of https://api.openai.com works without any other code changes.
+    temperature=0 asks the model to be as deterministic as it can be (still not perfectly
+    deterministic — see the friction log on this), which matters for an agent that's
+    supposed to follow the SYSTEM_PROMPT's steps reliably rather than improvise.
+    """
     return ChatOpenAI(base_url=LITELLM_BASE_URL, api_key=LITELLM_API_KEY, model=LITELLM_MODEL, temperature=0)
 
 
@@ -106,6 +150,17 @@ def build_llm() -> ChatOpenAI:
 # ---------------------------------------------------------------------------
 
 class TripRequirements(BaseModel):
+    """A Pydantic schema the LLM is asked to fill in (see extract_requirements below).
+
+    This is "structured output": instead of asking the model to reply in prose and then
+    trying to regex/parse that prose for an origin airport and a date, we hand the model
+    this schema and the LangChain/provider machinery (via with_structured_output) forces
+    the model's reply to actually conform to it — every field present, correctly typed.
+    Each Field's `description` isn't just documentation for humans; it's sent to the model
+    as part of the schema, so it directly shapes what the model extracts. That's why the
+    "food" exclusion note below isn't just a comment — changing that description is the
+    actual fix for the bug it describes.
+    """
     passenger_name: str = Field(description=f"Passenger's first name. Default '{DEFAULT_PASSENGER}' if not mentioned.")
     origin: str = Field(description=f"3-letter IATA origin airport code. Default '{DEFAULT_ORIGIN}' if not mentioned.")
     date: str = Field(description=f"Travel date as YYYY-MM-DD. Default '{DEFAULT_DATE}' if not mentioned.")
@@ -128,9 +183,14 @@ class TripRequirements(BaseModel):
     )
 
 
-# LCEL chain: ChatPromptTemplate | llm.with_structured_output
-# The | operator wires prompt → model as a Runnable sequence.
-# ChatPromptTemplate formats the messages; with_structured_output parses the response into TripRequirements.
+# LCEL ("LangChain Expression Language") chain: ChatPromptTemplate | llm.with_structured_output
+# The | operator is Python's bitwise-or, overloaded by LangChain so that chaining two
+# "Runnable" objects with it builds a pipeline: the left side's output becomes the right
+# side's input when you call .invoke(). Reading left to right: format a prompt, then feed
+# it to a model that's been configured to return a TripRequirements object instead of a
+# plain ChatMessage. `with_structured_output(TripRequirements)` is what actually attaches
+# the schema from above — under the hood it typically asks the provider for JSON-mode or
+# tool-calling output and parses the result back into that Pydantic model for you.
 REQUIREMENTS_CHAIN_PROMPT = ChatPromptTemplate.from_messages([
     ("system", "Extract structured trip requirements from the traveller's request below."),
     ("human", "{input}"),
@@ -139,7 +199,16 @@ REQUIREMENTS_CHAIN_PROMPT = ChatPromptTemplate.from_messages([
 
 @traceable(name="extract_trip_requirements", run_type="chain")
 def extract_requirements(prompt: str, llm: ChatOpenAI) -> dict[str, Any]:
-    """Extract structured trip requirements via an LCEL chain: prompt | llm with structured output."""
+    """Extract structured trip requirements via an LCEL chain: prompt | llm with structured output.
+
+    @traceable is a LangSmith decorator: it doesn't change what this function does, it just
+    wraps the call so LangSmith records it as a named span in the trace (here, as a "chain"
+    type span called "extract_trip_requirements"). Without it, this call would still work
+    exactly the same, you'd just have a harder time telling it apart from everything else
+    in a trace. This is a *plain* Python function (not a @tool) because the agent doesn't
+    choose to call it — run_agent always calls it once, up front, before the agent loop
+    even starts, to turn free text into structured data the agent's tools expect as input.
+    """
     chain = REQUIREMENTS_CHAIN_PROMPT | llm.with_structured_output(TripRequirements)
     requirements: TripRequirements = chain.invoke({"input": prompt.strip()})
     return requirements.model_dump()
@@ -148,6 +217,16 @@ def extract_requirements(prompt: str, llm: ChatOpenAI) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Tools — each wraps an A2A call to a specialist agent
 # ---------------------------------------------------------------------------
+# Everything in this section is a plain Python function with a @tool decorator on it.
+# @tool does three things: (1) it registers the function so create_agent() can hand it to
+# the LLM, (2) it turns the function's type hints and docstring into a JSON-schema
+# description the LLM actually reads to decide *when* and *with what arguments* to call it
+# — the docstring here isn't just documentation for you, it's the tool's user manual as far
+# as the model is concerned, and (3) it wraps the function so LangGraph can invoke it with
+# the exact arguments the LLM chose. The LLM never sees or runs this Python code directly:
+# it emits a structured "call get_destination_shortlist with these arguments" message, and
+# LangGraph is the thing that actually executes the function and feeds the return value
+# back in as a ToolMessage.
 
 @tool
 def get_destination_shortlist(vibes: list[str], budget_level: str, activities: list[str], origin: str, limit: int = 5) -> str:
@@ -223,10 +302,23 @@ def book_flight(passenger_name: str, from_: str, to: str, date: str) -> str:
         JSON string {"booking": {...}, "approval": "approved"} on success, or
         {"booking": null, "approval": "rejected"} if the human reviewer declined.
     """
-    # Human-in-the-loop gate: pauses this run (persisted via the checkpointer - see
-    # build_checkpointer) until a human resumes it with an approve/reject decision. The
-    # booking itself — the one irreversible, money-committing action in this workflow — never
-    # happens without that decision.
+    # --- Human-in-the-loop, explained ---
+    # interrupt(payload) does something unusual for a normal function call: it hands `payload`
+    # out of the agent entirely (run_agent sees it as result["__interrupt__"][0].value) and
+    # then *stops executing this function right here* — literally does not return, does not
+    # continue to the lines below — until someone resumes the run.
+    #
+    # "Resuming" means a separate, later call to agent.ainvoke(Command(resume=<value>), ...)
+    # using the *same* thread_id (see resume_agent below). When that happens, LangGraph
+    # doesn't start book_flight over from the top — it restores exactly the state this
+    # function was in when it called interrupt(), and interrupt() itself returns <value> as
+    # if it had been a normal blocking call all along (that's the `decision` variable below).
+    # Everything from this line down only runs *after* a human has responded.
+    #
+    # This is only possible because create_agent() was built with a checkpointer (see
+    # build_checkpointer/build_agent) — the checkpointer is what actually saves "book_flight
+    # was paused here, with these local variables" to Postgres/memory so it can be restored
+    # later, possibly by a completely different process handling the /approve HTTP request.
     decision = interrupt({
         "action": "approve_booking",
         "passenger_name": passenger_name,
@@ -243,8 +335,18 @@ def book_flight(passenger_name: str, from_: str, to: str, date: str) -> str:
     return json.dumps(result)
 
 
+# The list create_agent() actually receives. Order doesn't matter here — the LLM decides
+# which tool to call and when based on the SYSTEM_PROMPT and each tool's own docstring, not
+# on this list's order.
 TOOLS = [get_destination_shortlist, pick_destination, find_flight, book_flight]
 
+# This is the agent's *entire* control flow. There is no Python code anywhere that says
+# "first call get_destination_shortlist, then pick_destination, then..." — that sequencing
+# exists only as instructions to the LLM, which decides, one step at a time, which tool (if
+# any) to call next. This is sometimes called a "ReAct" agent (Reason, then Act, repeat):
+# at each step the model reasons about what it's seen so far and either calls one more tool
+# or decides it's done and writes a final reply. create_agent() provides the loop that
+# keeps asking "what next?" until the model stops calling tools.
 SYSTEM_PROMPT = """You are a travel booking orchestrator. Plan and book one trip per conversation by \
 calling tools in this order:
 
@@ -272,6 +374,14 @@ one deliberate exception to that)."""
 # hand-authored StateGraph. Still runs on LangGraph under the hood (same
 # CompiledStateGraph runtime create_react_agent returned), so .ainvoke()/
 # .astream_events() and the Postgres checkpointer behave identically.
+#
+# What create_agent() actually builds, conceptually: a small graph with (roughly) two kinds
+# of steps that alternate — "call the LLM with the conversation so far" and "run whichever
+# tool(s) the LLM just asked for" — plus the routing logic that decides, after each LLM
+# call, whether to go run a tool or stop and return the LLM's reply as final. You never
+# construct that graph by hand here; create_agent() does it from just an llm, a TOOLS list,
+# and a system_prompt. This is the "modernized" replacement for the older
+# langgraph.prebuilt.create_react_agent — same idea, newer LangChain v1 API surface.
 # ---------------------------------------------------------------------------
 
 _pool: AsyncConnectionPool | None = None
@@ -286,6 +396,15 @@ _pending_approvals: dict[str, dict[str, Any]] = {}
 
 async def build_checkpointer():
     """A Postgres-backed checkpointer for cross-request conversation memory.
+
+    A checkpointer is the piece of infrastructure that makes an agent "resumable": after
+    every step of the agent loop (every LLM call, every tool call), LangGraph serializes the
+    current state — the full message history, where interrupt() last paused, everything —
+    and saves it under a key you choose (thread_id, see _run_config below). The *next* time
+    you call .ainvoke() with that same thread_id, LangGraph loads that saved state first and
+    continues from there instead of starting fresh. Without a checkpointer, every call to
+    the agent would be a brand-new conversation with no memory of any previous call, and
+    interrupt() (see book_flight) would have nowhere to save a paused run at all.
 
     Falls back to an in-memory checkpointer (lost on restart, but otherwise fully
     functional for the lifetime of this pod) if Postgres isn't reachable, rather than no
@@ -318,6 +437,9 @@ async def build_checkpointer():
 
 
 async def build_agent():
+    """Assemble the actual runnable agent: one LLM, the four tools above, the system prompt
+    that tells the LLM how to use them, and a checkpointer so runs can be paused/resumed.
+    This is the one place all four pieces come together into something .ainvoke()-able."""
     llm = build_llm()
     checkpointer = await build_checkpointer()
     # name= gives this agent's run a meaningful LangSmith trace root instead of
@@ -326,6 +448,8 @@ async def build_agent():
 
 
 async def get_agent():
+    """Build the agent once per process and reuse it — building it opens the checkpointer's
+    connection pool, which you don't want to redo on every single request."""
     global _agent
     if _agent is None:
         _agent = await build_agent()
@@ -335,7 +459,14 @@ async def get_agent():
 def _run_config(thread_id: str) -> dict[str, Any]:
     """Shared RunnableConfig for a single trip-planning run: thread_id for checkpointing,
     plus the metadata LangSmith attaches to the resulting trace (LangSmith §5), plus the
-    console trace callback (verbose.py) that prints each tool call when VERBOSE is set."""
+    console trace callback (verbose.py) that prints each tool call when VERBOSE is set.
+
+    `thread_id` is the only thing that actually controls checkpointing behavior here — it's
+    the key the checkpointer uses to find (or create) this conversation's saved state. Every
+    call this file makes to .ainvoke() passes this same config shape, built from a thread_id,
+    so "same thread_id" is the one and only thing that makes two separate HTTP requests
+    share state (conversation history, a paused interrupt, anything).
+    """
     return {
         "configurable": {"thread_id": thread_id},
         "metadata": {**RUN_METADATA, "thread_id": thread_id},
@@ -354,7 +485,15 @@ async def run_agent(prompt: str, thread_id: str) -> dict[str, Any]:
         logger.info("  requirements: %s", requirements)
     agent = await get_agent()
     initial_message = HumanMessage(content=json.dumps({"trip_request": prompt, "requirements": requirements}))
+    # This is the actual agent loop kicking off: .ainvoke() keeps alternating LLM calls and
+    # tool calls (see the big comment above the Agent section) until either the model stops
+    # calling tools and just replies, or a tool calls interrupt() and the whole run pauses.
+    # Either way, .ainvoke() returns once — it's not a generator; for a step-by-step view of
+    # the same run, see stream_agent()'s .astream_events() below instead.
     result = await agent.ainvoke({"messages": [initial_message]}, config=_run_config(thread_id))
+    # "__interrupt__" showing up in the result dict is exactly how you tell, from the
+    # caller's side, that the run paused instead of finishing — see book_flight's interrupt()
+    # call and the big comment there for what's actually happening when this is true.
     if "__interrupt__" in result:
         summary = summarize_pending(result, requirements)
         _pending_approvals[thread_id] = summary["pending_approval"]
@@ -368,7 +507,15 @@ async def run_agent(prompt: str, thread_id: str) -> dict[str, Any]:
 
 
 async def resume_agent(thread_id: str, approved: bool) -> dict[str, Any]:
-    """Resume a run paused at book_flight's human-approval interrupt with a human decision."""
+    """Resume a run paused at book_flight's human-approval interrupt with a human decision.
+
+    Command(resume=...) is the counterpart to interrupt(): calling .ainvoke() with a Command
+    instead of a fresh {"messages": [...]} input tells LangGraph "don't start a new run — go
+    find the run that's paused on thread_id and continue it, handing this value back as
+    interrupt()'s return value." That's the `decision` book_flight receives. This only finds
+    the right paused run because of the checkpointer and because we pass the *same*
+    thread_id (via _run_config) that the original run used.
+    """
     if VERBOSE:
         logger.info("=== [%s] Resuming with approved=%s ===", thread_id, approved)
     agent = await get_agent()
@@ -387,7 +534,16 @@ def list_pending_approvals() -> dict[str, dict[str, Any]]:
 
 
 async def stream_agent(prompt: str, thread_id: str) -> AsyncIterator[dict[str, Any]]:
-    """Stream agent execution events (token chunks, tool start/end) for a single trip-planning run."""
+    """Stream agent execution events (token chunks, tool start/end) for a single trip-planning run.
+
+    Same agent, same config shape as run_agent — the only difference is .astream_events()
+    instead of .ainvoke(). Where .ainvoke() waits for the whole run and hands back one final
+    result, .astream_events() yields an event for every intermediate step as it happens
+    (a token as the model generates it, a tool starting, a tool finishing) — useful for a
+    live-updating UI, but not currently taught to handle the approval interrupt gracefully;
+    if a streamed run reaches book_flight, the stream just ends without a clean "paused"
+    event (a known gap, not yet needed by any current caller).
+    """
     if VERBOSE:
         logger.info("=== [%s] New streaming request: %s ===", thread_id, truncate(prompt))
     requirements = extract_requirements(prompt, build_llm())
@@ -403,7 +559,16 @@ async def stream_agent(prompt: str, thread_id: str) -> AsyncIterator[dict[str, A
 
 def _scan_tool_calls(messages: list[Any]) -> dict[str, Any]:
     """Shared by summarize_result/summarize_pending: pull each tool's result and the full
-    tool-call sequence out of the agent's message history."""
+    tool-call sequence out of the agent's message history.
+
+    `messages` here is the agent's whole conversation so far, as LangChain message objects —
+    HumanMessage (what the user/system sent in), AIMessage (what the LLM said, including any
+    tool calls it requested), and ToolMessage (what a tool returned, tagged with which tool
+    produced it). Reading your own tool outputs back out of this list, rather than having
+    each tool push its result somewhere else, is deliberate: the message history *is* the
+    agent's state, and it's exactly what the checkpointer saves/restores — so anything a
+    caller needs to know about a run should be derivable from it.
+    """
     shortlist = selected_destination = flight = booking = None
     rejected = False
     tool_calls: list[dict[str, Any]] = []
@@ -464,7 +629,14 @@ def summarize_result(result: dict[str, Any], requirements: dict[str, Any]) -> di
 def summarize_pending(result: dict[str, Any], requirements: dict[str, Any]) -> dict[str, Any]:
     """Shape a result for a run paused at book_flight's human-approval interrupt: everything up
     to the pending booking is already known from completed tool calls; only the booking itself
-    is on hold until a human resolves it via POST /a2a/travel-orchestrator/approve."""
+    is on hold until a human resolves it via POST /a2a/travel-orchestrator/approve.
+
+    `result["__interrupt__"]` is a list (LangGraph supports multiple simultaneous interrupts
+    in more complex graphs; this agent only ever produces one at a time) of Interrupt objects.
+    `.value` is exactly the dict book_flight passed into interrupt(...) — this is how the
+    paused tool call's "I need a decision on this" payload makes it all the way out to an
+    HTTP response.
+    """
     messages = result.get("messages") or []
     scan = _scan_tool_calls(messages)
     pending = result["__interrupt__"][0].value
@@ -495,7 +667,15 @@ def _requirements_from_messages(messages: list[Any]) -> dict[str, Any]:
 
 
 def serialize_event(event: dict[str, Any]) -> dict[str, Any]:
-    """Reduce a LangGraph astream_events payload to a JSON-serializable summary for SSE."""
+    """Reduce a LangGraph astream_events payload to a JSON-serializable summary for SSE.
+
+    Each event from .astream_events() is a dict with an "event" name describing what just
+    happened under the hood — "on_chat_model_stream" for one streamed token of the LLM's
+    reply, "on_tool_start"/"on_tool_end" for a tool call beginning/finishing, plus several
+    other event kinds this function doesn't bother forwarding. This just picks out the
+    handful that are useful for a live UI and flattens them into something json.dumps can
+    serialize directly (the raw events contain LangChain objects, not plain dicts).
+    """
     kind = event.get("event")
     name = event.get("name")
     data = event.get("data") or {}
@@ -523,6 +703,11 @@ def call_specialist(base_url: str, payload: dict[str, Any]) -> dict[str, Any]:
     The specialist returns its result the same way — JSON in the response text.
     Routing through agentgateway means all inter-agent traffic is observable.
 
+    This is plain, synchronous httpx — nothing LangChain-specific about the HTTP call
+    itself. The only LangSmith-aware part is the trace-header propagation below: it's what
+    makes five separate services' traces show up as one connected tree in LangSmith instead
+    of five unrelated ones.
+
     The current LangSmith run's trace headers are attached (when tracing is active and this
     is called from within a traced tool run) so specialists that read them via
     `langsmith.run_helpers.tracing_context` nest their spans under this run.
@@ -539,6 +724,14 @@ def call_specialist(base_url: str, payload: dict[str, Any]) -> dict[str, Any]:
         },
     }
     headers = {}
+    # get_current_run_tree() asks LangSmith "is there a trace currently active on this
+    # thread of execution, and if so, what is it?" — it works because @traceable (on
+    # extract_requirements) and create_agent's own internal tracing set up that context
+    # before calling into tool functions like the ones above, which call this helper.
+    # .to_headers() turns that active trace's identity into HTTP headers (similar in spirit
+    # to how distributed tracing systems like OpenTelemetry propagate a trace ID across
+    # service calls). The specialist on the other end reads those headers back out via
+    # `tracing_context(parent=...)` and nests its own spans underneath this one.
     run_tree = get_current_run_tree()
     if run_tree is not None:
         try:

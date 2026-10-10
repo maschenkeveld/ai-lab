@@ -1,4 +1,12 @@
-"""FastAPI server wrapping the orchestrator's LangGraph tool-calling agent. See graph.py for full architecture notes."""
+"""FastAPI server wrapping the orchestrator's LangGraph tool-calling agent. See graph.py for full architecture notes.
+
+This file is deliberately "dumb": every endpoint just translates one HTTP shape into a call
+to run_agent/resume_agent/stream_agent (all defined in graph.py) and translates the result
+back into another HTTP shape. None of the actual agent logic — the tool-calling loop, the
+human-approval interrupt, the checkpointer — lives here; this is just the network-facing door
+into it. If you're trying to understand *how the agent thinks*, read graph.py instead; this
+file is about *how other services talk to it*.
+"""
 
 import json
 import os
@@ -63,6 +71,13 @@ def agent_card() -> dict[str, Any]:
 @app.post("/a2a/jsonrpc")
 @app.post("/a2a/travel-orchestrator/a2a/jsonrpc")
 async def jsonrpc(request: JsonRpcRequest) -> dict[str, Any]:
+    """The main entry point: a specialist, the eval harness, or any other A2A caller sends a
+    trip request here. This is where run_agent (graph.py) gets called — everything "agentic"
+    happens inside that call; this function just unwraps the JSON-RPC envelope going in and
+    wraps the result back into one going out. A single call here can kick off several LLM
+    calls and several more A2A calls to specialists before it returns — or it can return
+    almost immediately with status="awaiting_approval" if the agent reached book_flight's
+    human-approval pause (see graph.py's interrupt() comment for what that means)."""
     params = request.params or {}
     prompt = extract_prompt(params)
     thread_id = extract_thread_id(params)
@@ -121,19 +136,34 @@ class ApprovalRequest(BaseModel):
     approved: bool
 
 
+# --- The two endpoints behind the human-in-the-loop gate ---
+# Neither of these touches the LLM or the tool-calling loop directly — they're thin wrappers
+# around graph.py's list_pending_approvals()/resume_agent(). The interesting part (interrupt()
+# pausing the run, Command(resume=...) continuing it) all happens inside graph.py; this is
+# just how a human reviewer's HTTP request reaches that mechanism.
+
 @app.get("/pending")
 @app.get("/a2a/travel-orchestrator/pending")
 def pending_approvals() -> dict[str, Any]:
     """Runs currently paused awaiting a human booking decision — lets a reviewer (CLI tool,
     UI) discover what's waiting without already knowing a thread_id (IMPROVEMENTS.md's
-    human-in-the-loop requirement: book_flight pauses here until approved or rejected)."""
+    human-in-the-loop requirement: book_flight pauses here until approved or rejected).
+
+    This reads an in-memory dict (graph.py's _pending_approvals), not the checkpointer
+    directly — LangGraph itself has no built-in "list every currently-interrupted thread"
+    query, which is exactly the gap this registry works around (see the friction log)."""
     return {"pending": list_pending_approvals()}
 
 
 @app.post("/approve")
 @app.post("/a2a/travel-orchestrator/approve")
 async def approve(payload: ApprovalRequest) -> dict[str, Any]:
-    """Resume a paused run with a human's approve/reject decision for its pending booking."""
+    """Resume a paused run with a human's approve/reject decision for its pending booking.
+
+    `payload.thread_id` has to be one of the keys GET /pending just showed you — it's what
+    tells LangGraph which specific paused run to continue (see resume_agent/Command(resume=...)
+    in graph.py). `payload.approved` becomes the `decision` dict that book_flight's
+    `interrupt(...)` call receives back, as if it had been waiting synchronously for it."""
     result = await resume_agent(payload.thread_id, payload.approved)
     return {"thread_id": payload.thread_id, **result}
 
