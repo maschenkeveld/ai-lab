@@ -64,6 +64,16 @@ destinations backend's activities field never literally contains "food" (it's mo
 filter requires an exact string match. `TripRequirements`'s own field description used to
 list "food" as a valid activity (fixed in graph.py); examples here that want a food-focused
 trip put "food" in `vibes` instead.
+
+## `budget_level: "low"` has no destinations today
+
+Confirmed live (the AMBIGUOUS Dublin example sometimes extracts "low" from "nothing too
+fancy on the budget"): the destinations dataset currently only has `high` and `mid` budget
+destinations, zero `low` ones, so any request landing on `budget_level: "low"` gets an empty
+shortlist no matter what else is asked for. Unlike the activities/food case above, this isn't
+a schema-vs-data mismatch to fix in code - `low` is a legitimately meaningful tier the schema
+should keep advertising, the demo dataset just hasn't populated it yet. Noted here rather
+than hidden; no HAPPY_PATH/MISSING_VALUES example deliberately targets `low` for this reason.
 """
 
 from typing import Any
