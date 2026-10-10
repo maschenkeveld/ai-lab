@@ -101,7 +101,13 @@ async def find_flight(payload: dict[str, Any]) -> dict[str, Any]:
             "date":      payload["date"],
         })
         data = _parse(raw)
-        return {"flight": data}
+        # langchain_mcp_adapters' tool wrapper can swallow a failed MCP call and return a
+        # formatted "Error calling tool '...'" string as its successful result instead of
+        # raising (confirmed live: an unrecognized IATA code produces a 400 from
+        # rest-flights, which surfaces here as a string, not an exception). Only a real
+        # flight object counts - anything else means no flight, matching this function's
+        # documented {"flight": null} contract instead of leaking an error string into it.
+        return {"flight": data if isinstance(data, dict) else None}
     except Exception:
         return {"flight": None}
 

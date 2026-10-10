@@ -92,16 +92,22 @@ async def jsonrpc(request: JsonRpcRequest, http_request: Request) -> dict[str, A
 
 @traceable(name="book_flight")
 async def book_flight(payload: dict[str, Any]) -> dict[str, Any]:
-    tool = next(t for t in _tools if t.name == "create_booking")
-    raw = await tool.ainvoke({
-        "passenger_name": payload["passenger_name"],
-        "from_iata":      payload["from"],
-        "to_iata":        payload["to"],
-        "date":           payload["date"],
-    })
-    data = _parse(raw)
-    booking = data.get("booking", data) if isinstance(data, dict) else data
-    return {"booking": booking}
+    try:
+        tool = next(t for t in _tools if t.name == "create_booking")
+        raw = await tool.ainvoke({
+            "passenger_name": payload["passenger_name"],
+            "from_iata":      payload["from"],
+            "to_iata":        payload["to"],
+            "date":           payload["date"],
+        })
+        data = _parse(raw)
+        # Same MCP-error-as-string-not-exception gap as flight-finder's find_flight: only a
+        # real booking object counts as success, matching this function's {"booking": {...}}
+        # contract instead of leaking a raw error string into it.
+        booking = data.get("booking", data) if isinstance(data, dict) else None
+        return {"booking": booking}
+    except Exception:
+        return {"booking": None}
 
 
 def _parse(raw: Any) -> Any:

@@ -14,9 +14,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from evaluators import (
     booking_succeeded,
+    date_correct,
     never_book_before_flight,
     no_duplicate_destination_retry,
     no_false_booking,
+    origin_correct,
     tool_sequence_valid,
 )
 
@@ -102,3 +104,20 @@ def test_no_duplicate_destination_retry_catches_picking_the_same_destination_twi
         {"tool": "find_flight", "output": {"flight": None}},
     ]
     assert no_duplicate_destination_retry(bad)["score"] is False
+
+
+def test_origin_correct_and_date_correct_do_not_crash_on_a_non_dict_flight():
+    # Confirmed live against shared-pve-home: langchain_mcp_adapters' tool wrapper can
+    # swallow an MCP error and return a formatted string as a "successful" result, which
+    # flight-finder used to pass straight through as outputs["flight"] instead of null
+    # (fixed server-side too - see travel_flight_finder/server.py's find_flight). Evaluators
+    # must not crash either way.
+    outputs_with_string_flight = {
+        "flight": "Error calling tool 'flight_price': Client error '400 Bad Request' ...",
+        "requirements": {"origin": "XYZ", "date": "2026-09-01"},
+    }
+    ref = {"origin": "AMS", "date": "2026-09-01"}
+    assert origin_correct(outputs_with_string_flight, ref)["score"] is False
+    result = date_correct(outputs_with_string_flight, ref)
+    assert result["score"] is True
+    assert result["comment"] == "no flight booked; skipped"

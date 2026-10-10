@@ -23,6 +23,13 @@ def _tool_outputs(outputs: dict[str, Any], tool_name: str) -> list[Any]:
     return [tc.get("output") for tc in outputs.get("tool_calls") or [] if tc.get("tool") == tool_name]
 
 
+def _flight_dict(outputs: dict[str, Any]) -> dict[str, Any]:
+    """outputs["flight"] as a dict, or {} for anything else (None, or - before the
+    flight-finder fix that swallowed MCP errors into a string - a bare error string)."""
+    flight = outputs.get("flight")
+    return flight if isinstance(flight, dict) else {}
+
+
 # ---------------------------------------------------------------------------
 # Booking outcome
 # ---------------------------------------------------------------------------
@@ -71,7 +78,7 @@ def origin_correct(outputs: dict[str, Any], reference_outputs: dict[str, Any]) -
     expected = reference_outputs.get("origin")
     if not expected:
         return {"key": "origin_correct", "score": True, "comment": "no expected origin given; skipped"}
-    flight = outputs.get("flight") or {}
+    flight = _flight_dict(outputs)
     actual = flight.get("from") or (outputs.get("requirements") or {}).get("origin")
     return {"key": "origin_correct", "score": actual == expected, "comment": f"expected={expected!r}, actual={actual!r}"}
 
@@ -81,7 +88,7 @@ def date_correct(outputs: dict[str, Any], reference_outputs: dict[str, Any]) -> 
     expected = reference_outputs.get("date") or (outputs.get("requirements") or {}).get("date")
     if not expected:
         return {"key": "date_correct", "score": True, "comment": "no expected date given; skipped"}
-    flight = outputs.get("flight") or {}
+    flight = _flight_dict(outputs)
     actual = flight.get("date")
     if actual is None:
         return {"key": "date_correct", "score": True, "comment": "no flight booked; skipped"}

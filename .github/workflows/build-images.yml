@@ -28,17 +28,29 @@ jobs:
       images-affected: ${{ steps.filter.outputs.images-affected }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # evals/** has no built image (see matrix in the build job below) — on an evals-only
       # change, skip the build job below instead of rebuilding all 12 images for nothing.
-      - uses: dorny/paths-filter@v3
+      # Uses git's own pathspec exclusion (:!path) rather than a paths-filter action: an
+      # earlier attempt mixing a broad include with a "!exclude" glob in one dorny/
+      # paths-filter filter list did NOT exclude anything (confirmed live - an evals-only
+      # push still matched "images-affected") because that action's negation patterns only
+      # narrow an already-matched filter under predicate-quantifier: every, not the default
+      # "some" used here. git's pathspec semantics are unambiguous and don't need a 3rd party
+      # action at all.
+      - name: Detect whether any image-relevant files changed
         id: filter
-        with:
-          filters: |
-            images-affected:
-              - "applications/**"
-              - "!applications/agents/travel-agency-langgraph/evals/**"
-              - "k8s/**"
+        run: |
+          base="${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}"
+          if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            echo "images-affected=true" >> "$GITHUB_OUTPUT"
+          elif git diff --quiet "$base" "${{ github.sha }}" -- applications k8s ':!applications/agents/travel-agency-langgraph/evals'; then
+            echo "images-affected=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "images-affected=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: astral-sh/setup-uv@v3
       - name: Lint Python (ruff)
