@@ -51,11 +51,11 @@ Client
   │     └── /v1/chat/completions ──► OpenAI / Gemini / Ollama
   │
   └── agentgateway.lab ──► agentgateway
-        ├── /a2a/travel-orchestrator ──► LangGraph orchestrator (port 4200)
-        │     ├── /a2a/destination ──► LangGraph destination agent (port 4201)
-        │     ├── /a2a/destination-decision ──► LangGraph decision agent (port 4202)
-        │     ├── /a2a/flight-finder ──► LangGraph flight-finder (port 4203)
-        │     └── /a2a/flight-booker ──► LangGraph flight-booker (port 4204)
+        ├── /a2a/travel-orchestrator ──► LangChain/LangGraph orchestrator (port 4200)
+        │     ├── /a2a/destination ──► destination specialist (port 4201)
+        │     ├── /a2a/destination-decision ──► destination-decision specialist (port 4202)
+        │     ├── /a2a/flight-finder ──► flight-finder specialist (port 4203)
+        │     └── /a2a/flight-booker ──► flight-booker specialist (port 4204)
         ├── /mcp-dice-roller ──► Go MCP server
         ├── /mcp-destinations ──► Python FastMCP adapter → REST destinations
         ├── /mcp-flights ──► Python FastMCP adapter → REST flights
@@ -109,24 +109,24 @@ All routes are unauthenticated. agentgateway does not enforce auth on MCP or A2A
 
 ### LangGraph agents
 
-Five Python microservices, each running FastAPI + LangGraph and exposing A2A-compatible endpoints:
+Five Python microservices exposing A2A-compatible endpoints. Only the orchestrator builds a LangGraph graph — via LangChain v1's `create_agent`, which still runs on the LangGraph runtime under the hood; the four specialists are plain FastAPI services that call MCP tools through `langchain-mcp-adapters`' `MultiServerMCPClient` and don't build graphs of their own. Prefer thinking of this as **LangChain/LangGraph orchestrator + A2A specialist services**, not "5 LangGraph agents".
 
 | Agent | Port | Responsibility |
 |---|---|---|
-| `orchestrator` | 4200 | Coordinates the workflow via LangGraph graph; calls specialists over A2A |
-| `destination` | 4201 | Calls REST destinations API to shortlist destinations |
-| `destination-decision` | 4202 | Picks one destination from the shortlist |
-| `flight-finder` | 4203 | Searches for flights via REST flights API |
-| `flight-booker` | 4204 | Books the selected flight via REST book-flights API |
+| `orchestrator` | 4200 | LangChain tool-calling agent (`create_agent`); calls the four specialists below as tools over A2A |
+| `destination` | 4201 | Calls the `list_destinations` MCP tool to shortlist destinations |
+| `destination-decision` | 4202 | Picks one destination from the shortlist via the dice-roller MCP tool (`roll-20`) |
+| `flight-finder` | 4203 | Looks up a flight via the `flight_price` MCP tool |
+| `flight-booker` | 4204 | Books the selected flight via the `create_booking` MCP tool |
 
 Every agent exposes:
 - `/.well-known/agent-card.json`
 - `/a2a/jsonrpc`
 - `/health`
 
-The orchestrator also has a `/plan` REST endpoint for quick testing.
+The orchestrator also has `/plan` and `/plan/stream` REST endpoints for quick testing.
 
-**LangSmith tracing** — enabled automatically when the `langsmith-secret` k8s Secret is present (`LANGCHAIN_API_KEY`). Only the orchestrator is instrumented; specialist agents are not.
+**LangSmith tracing** — enabled automatically when the `langsmith-secret` k8s Secret is present (`LANGCHAIN_API_KEY`). All five services are instrumented (`@traceable`, with `langsmith.run_helpers.tracing_context` propagating trace headers across each A2A hop), so one trip-planning request produces a single nested trace tree, not five disconnected ones.
 
 ### MCP servers
 
@@ -134,10 +134,10 @@ Four MCP servers. All listen on port 8000 at path `/mcp` (StreamableHTTP protoco
 
 | Server | Language | Tools |
 |---|---|---|
-| `dice-roller` | Go | `roll_dice` |
-| `destinations-adapter` | Python (FastMCP) | `get_destinations` |
-| `flights-adapter` | Python (FastMCP) | `search_flights` |
-| `book-flights-adapter` | Python (FastMCP) | `book_flight`, `list_bookings`, `cancel_booking` |
+| `dice-roller` | Go | `roll-2`, `roll-6`, `roll-20` |
+| `destinations-adapter` | Python (FastMCP) | `list_destinations`, `shortlist_destinations`, `get_destination` |
+| `flights-adapter` | Python (FastMCP) | `list_airports`, `flight_price` |
+| `book-flights-adapter` | Python (FastMCP) | `create_booking`, `list_bookings` |
 
 The Python adapters use FastMCP to wrap the Go REST server APIs as MCP tools.
 
@@ -412,13 +412,13 @@ All components push to Grafana LGTM (`grafana.lab:3000`, default credentials `ad
 | `rest-destinations` | ✓ | ✓ OTLP + stdout | ✓ |
 | `rest-book-flights` | ✓ | ✓ OTLP + stdout | ✓ |
 | `mcp-dice-roller` | ✓ | ✓ OTLP + stdout | ✓ |
-| LangGraph agents (×5) | ✗ | stdout only | ✗ |
+| LangGraph agents (×5) | ✓ | ✓ OTLP + stdout | ✓ |
 | LiteLLM | ✗ (Prometheus metrics on `/metrics`) | stdout | ✗ |
 | agentgateway | ✗ | stdout | ✗ |
 
-**LangSmith tracing** — the orchestrator sends LangGraph node traces to LangSmith when `LANGCHAIN_API_KEY` is present in the `langsmith-secret` k8s Secret. This covers LangGraph-level spans (nodes, edges, LLM calls) but is a separate signal not visible in Grafana Tempo.
+**LangSmith tracing** — all five agent services send traces to LangSmith when `LANGCHAIN_API_KEY` is present in the `langsmith-secret` k8s Secret: the orchestrator's agent loop (LLM turns, tool calls) plus each specialist's `@traceable` function, stitched into one nested trace per request via trace-header propagation across the A2A hops. This covers agent/tool-call semantics that OTEL's generic HTTP auto-instrumentation doesn't, and is a separate signal from Grafana Tempo below.
 
-For full distributed OTEL tracing across the agent chain (comparable to the Kong AI Lab), the LangGraph agents need OTEL SDK instrumentation added — see [Known gaps](#known-gaps).
+The LangGraph agents also emit OTEL traces/logs/metrics via OTLP (FastAPI + httpx auto-instrumentation in each service's `otel.py`), so they do show up in Tempo — just at the HTTP-request level, not with LangSmith's agent/tool granularity.
 
 ---
 
@@ -431,7 +431,7 @@ For full distributed OTEL tracing across the agent chain (comparable to the Kong
 | MCP | agentgateway (open, no auth) | Kong MCP GW | agentgateway routes MCP natively; Kong adds OAuth2 scope ACL, key-auth ACL, token exchange |
 | A2A agents | Python + LangGraph | TypeScript + Volcano SDK | Same workflow, different runtimes |
 | Auth enforcement | Keycloak present, routes unauthenticated | Keycloak + OIDC on every route | Significant gap — Kong enforces auth at the gateway layer |
-| Observability | REST servers + dice-roller wired; agents not wired | All components fully wired (OTEL traces + logs + metrics) | Partial gap |
+| Observability | REST servers, dice-roller, and LangGraph agents all OTEL-wired (traces+logs+metrics); LiteLLM/agentgateway logs-only | All components fully wired (OTEL traces + logs + metrics) | LiteLLM/agentgateway still a gap |
 | LLM Analytics | Full pipeline (Kafka → Postgres → React) | Same | Parity |
 | MCP adapters | Python FastMCP (explicit adapter per API) | Kong ai-mcp-proxy (auto-converts REST) | Kong approach is zero-code |
 | Event/Kafka | Direct Kafka exposure | Kong Event Gateway (protocol proxy + auth) | Kong adds a managed broker layer |
@@ -441,7 +441,6 @@ For full distributed OTEL tracing across the agent chain (comparable to the Kong
 
 ## Known gaps
 
-- LangGraph agents (×5) have no OTEL instrumentation — no traces, no OTLP logs, no metrics from the agent layer. Only LangSmith (orchestrator only, optional).
 - agentgateway routes are open — no auth, no scope enforcement on MCP or A2A endpoints.
 - LiteLLM has no OTEL export — it exposes a `/metrics` Prometheus endpoint but doesn't push to LGTM.
 - No Insomnia collection files for MCP demo flows.

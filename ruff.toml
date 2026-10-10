@@ -1,0 +1,12 @@
+target-version = "py312"
+
+[lint]
+# Deliberately minimal (IMPROVEMENTS.md §21: "add only useful validation") — pyflakes +
+# pycodestyle errors (ruff's own conservative default) plus import sorting, not every rule
+# ruff ships. Without this file present, `ruff check` falls back to a much broader implicit
+# rule set, which would flag hundreds of pre-existing, non-urgent style issues on first run.
+select = ["E4", "E7", "E9", "F", "I"]
+# E402 (import not at top of file) conflicts with this repo's deliberate pattern, repeated
+# across every specialist's server.py, of calling setup_otel(...) before importing langsmith
+# so tracing instrumentation is live before any instrumented module is imported.
+ignore = ["E402"]

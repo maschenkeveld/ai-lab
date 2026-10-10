@@ -91,10 +91,10 @@ done
 ```
 
 Expected:
-- `mcp-dice-roller`: `roll_dice`
-- `mcp-destinations`: `get_destinations`
-- `mcp-flights`: `search_flights`
-- `mcp-book-flights`: `book_flight`, `list_bookings`, `cancel_booking`
+- `mcp-dice-roller`: `roll-2`, `roll-6`, `roll-20`
+- `mcp-destinations`: `list_destinations`, `shortlist_destinations`, `get_destination`
+- `mcp-flights`: `list_airports`, `flight_price`
+- `mcp-book-flights`: `create_booking`, `list_bookings`
 
 ---
 
@@ -157,7 +157,7 @@ kubectl logs -n rest-flights deploy/rest-flights --tail=5 | grep -i "otel\|traci
 
 Then open **Grafana → Explore → Tempo** and search service `rest-flights`. Expect at least one recent trace with a `http.request` root span.
 
-Note: LangGraph agents do NOT emit OTEL traces — only LangSmith (if configured).
+Note: the LangGraph agents also emit OTEL traces/logs/metrics via OTLP (FastAPI + httpx auto-instrumentation in each service's `otel.py`) — check service `travel-orchestrator` (or any specialist) in Tempo the same way. This is in addition to LangSmith (if configured), which separately captures agent/tool-call detail the OTEL HTTP spans don't.
 
 ---
 

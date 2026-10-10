@@ -147,7 +147,7 @@ Consumed by the LangGraph orchestrator for chat completions (`LITELLM_BASE_URL=h
 
 Each agent is a Python package with:
 - `server.py` — FastAPI app, exposes `/.well-known/agent-card.json`, `/a2a/jsonrpc`, `/health`, and (orchestrator only) `/plan` and `/plan/stream`
-- `graph.py` — orchestrator only; builds a `langgraph.prebuilt.create_react_agent` tool-calling agent (not a hand-authored `StateGraph`)
+- `graph.py` — orchestrator only; builds a `langchain.agents.create_agent` (LangChain v1) tool-calling agent (not a hand-authored `StateGraph` — it still runs on the LangGraph runtime under the hood, same as the older `create_react_agent`)
 - `Dockerfile` — builds a container image named `travel-<agent>-langgraph`
 
 The orchestrator is an LLM-driven tool-calling agent: it extracts trip requirements from free text via a structured LLM call, then autonomously calls four `@tool`-wrapped specialist functions (`get_destination_shortlist`, `pick_destination`, `find_flight`, `book_flight`) in a ReAct loop, retrying with a growing exclusion list when no flight is found. Each tool sends an A2A JSON-RPC request to a specialist via agentgateway.
@@ -161,9 +161,11 @@ Each specialist uses `langchain-mcp-adapters` (`MultiServerMCPClient`) to call M
 | `flight-finder` | `agentgateway.lab/mcp-flights` | `flight_price` |
 | `flight-booker` | `agentgateway.lab/mcp-book-flights` | `create_booking` |
 
-MCP tool discovery (`tools/list`) happens at pod startup via FastAPI `lifespan`. The orchestrator calls LiteLLM for chat completions (`LITELLM_BASE_URL`/`LITELLM_MODEL`/`LITELLM_API_KEY`, default alias `openai-gpt`). The `destination` specialist additionally calls LiteLLM's `embedding-openai` alias via `OpenAIEmbeddings` to semantically re-rank the `list_destinations` candidates against the trip request, falling back to the MCP tool's keyword-filtered order if the embedding call fails.
+MCP tool discovery (`tools/list`) happens at pod startup via FastAPI `lifespan` (`await _mcp_client.get_tools()`). The orchestrator calls LiteLLM for chat completions (`LITELLM_BASE_URL`/`LITELLM_MODEL`/`LITELLM_API_KEY`, default alias `openai-gpt`). The `destination` specialist additionally calls LiteLLM's `embedding-openai` alias via `OpenAIEmbeddings` to semantically re-rank the `list_destinations` candidates against the trip request, falling back to the MCP tool's keyword-filtered order if the embedding call fails.
 
-Conversation state (including which destinations have been tried) persists per `thread_id` via a `PostgresSaver` checkpointer backed by the existing `llm-analytics` Postgres — pass `thread_id` in a `/plan` call's payload to continue a prior trip-planning conversation; omit it to start a new one. If Postgres isn't reachable, the orchestrator falls back to stateless runs rather than failing startup.
+Conversation state (including which destinations have been tried) persists per `thread_id` via an `AsyncPostgresSaver` checkpointer (backed by an `AsyncConnectionPool`) against the existing `llm-analytics` Postgres — pass `thread_id` in a `/plan` call's payload to continue a prior trip-planning conversation; omit it to start a new one. If Postgres isn't reachable, the orchestrator falls back to stateless runs rather than failing startup.
+
+Each service (orchestrator + 4 specialists, plus `evals/`) manages its own dependencies with `uv` (`pyproject.toml` + `uv.lock` per package). Offline evaluation of the orchestrator — a LangSmith dataset, deterministic + LLM-judge evaluators (`evals/evaluators.py`), and a thread-state check — lives in `evals/`, run via `uv run run_eval.py`.
 
 LangSmith tracing is enabled when `LANGCHAIN_TRACING_V2=true` and `LANGCHAIN_API_KEY` is set (via `langsmith-secret` k8s Secret, created by `task secrets:langsmith` from `.env`'s `LANGCHAIN_API_KEY`). All five services are wired (previously only the orchestrator was); specialist handlers are wrapped in `@traceable` and read the orchestrator's trace headers via `langsmith.run_helpers.tracing_context` so one trip-planning request produces a single nested trace tree in the `ai-lab-oss` LangSmith project, instead of five disconnected traces.
 
@@ -187,8 +189,8 @@ Pattern:
 ```python
 mcp = FastMCP("destinations-adapter")
 
-@mcp.tool()
-def get_destinations(vibes: str, budget: str) -> list[dict]:
+@mcp.tool
+async def list_destinations(vibes: str, budget_level: str, activities: list[str], limit: int) -> dict:
     return httpx.get("http://traefik-api-gw.lab/destinations/v1/destinations", ...).json()
 ```
 
@@ -221,13 +223,13 @@ LGTM stack at `grafana.lab:3000` (admin/admin). Receives OTLP push on port 4318 
 **What's currently wired:**
 - REST servers (all 3): OTEL traces + logs + metrics via OTLP
 - `mcp-dice-roller`: OTEL traces + logs + metrics via OTLP
+- LangGraph agents (all 5): OTEL traces + logs + metrics via OTLP too (`otel.py` in each package sets up `FastAPIInstrumentor`/`HTTPXClientInstrumentor` plus OTLP log/metric export) — this covers the HTTP-request layer of each service, not agent/tool-call semantics. LangSmith (all 5 services, nested into one trace tree per request) is the separate, complementary signal for that agent-level detail.
 
 **What's not wired (gap vs Kong AI Lab):**
-- LangGraph agents: no OTEL SDK — tracing is via LangSmith (all 5 services, nested into one trace tree per request) instead of OTLP into LGTM
 - LiteLLM: Prometheus `/metrics` endpoint, not pushed to LGTM
 - agentgateway: stdout logs only
 
-To view what's in Grafana: Explore → Tempo (traces from REST/MCP tier), Explore → Loki (logs from all components).
+To view what's in Grafana: Explore → Tempo (traces from REST/MCP tier and the LangGraph agents), Explore → Loki (logs from all components).
 
 ---
 

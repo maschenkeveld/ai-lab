@@ -24,3 +24,5 @@ tls/dp-mcp.crt
 tls/dp-mcp.key
 .venv/
 __pycache__/
+*.pyc
+*.egg-info/

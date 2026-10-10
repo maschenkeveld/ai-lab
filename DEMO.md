@@ -139,7 +139,7 @@ Same request body, three different providers. The client doesn't need to know wh
 http://agentgateway.lab/mcp-flights
 ```
 
-The client will discover and list available tools. You can invoke `search_flights` directly from the MCP client without writing any agent code.
+The client will discover and list available tools. You can invoke `flight_price` directly from the MCP client without writing any agent code.
 
 **To verify the tool list from the CLI:**
 
@@ -153,10 +153,10 @@ curl -X POST http://agentgateway.lab/mcp-flights \
 
 | MCP endpoint | Tools |
 | --- | --- |
-| `agentgateway.lab/mcp-flights` | `search_flights` |
-| `agentgateway.lab/mcp-destinations` | `get_destinations` |
-| `agentgateway.lab/mcp-book-flights` | `book_flight`, `list_bookings`, `cancel_booking` |
-| `agentgateway.lab/mcp-dice-roller` | `roll_dice` |
+| `agentgateway.lab/mcp-flights` | `list_airports`, `flight_price` |
+| `agentgateway.lab/mcp-destinations` | `list_destinations`, `shortlist_destinations`, `get_destination` |
+| `agentgateway.lab/mcp-book-flights` | `create_booking`, `list_bookings` |
+| `agentgateway.lab/mcp-dice-roller` | `roll-2`, `roll-6`, `roll-20` |
 
 The backends are plain REST services — no MCP code in them. agentgateway handles the protocol conversion.
 
@@ -221,7 +221,7 @@ curl -X POST http://agentgateway.lab/a2a/destination/a2a/jsonrpc \
 
 ### Step 4 — Show the retry loop (optional)
 
-The orchestrator retries with a different destination if flight-finder returns nothing. This is a conditional edge in the LangGraph graph — not a linear pipeline. Open `applications/agents/travel-agency-langgraph/orchestrator/travel_orchestrator/graph.py` and walk through `route_after_flight` and the `add_conditional_edges` call in `build_graph()`.
+The orchestrator retries with a different destination if flight-finder returns nothing — but this is **prompt-driven, not graph-driven**. There's no hand-authored `StateGraph`, no `route_after_flight`, no conditional edges: the orchestrator is a single LangChain tool-calling agent (`langchain.agents.create_agent`), and the retry behavior lives entirely in `SYSTEM_PROMPT` in `graph.py`, which instructs the model to call `pick_destination` again with the failed IATA code appended to `tried_iata_codes` whenever `find_flight` returns `{"flight": null}`. Open `applications/agents/travel-agency-langgraph/orchestrator/travel_orchestrator/graph.py` and read `SYSTEM_PROMPT` and the `find_flight` tool to see this.
 
 ---
 
@@ -290,11 +290,12 @@ Default credentials: `admin / admin`
 
 Go to [smith.langchain.com](https://smith.langchain.com) → project `ai-lab-oss`.
 
-Each call to `graph.invoke()` appears as a trace with:
-- One row per node execution (`parse_requirements`, `call_destination`, etc.)
-- Inputs and outputs for each node
-- Total latency breakdown
-- The retry loop visible as repeated `call_destination_decision` → `call_flight_finder` rows if a flight wasn't found on the first pick
+Each `/plan` call appears as a single nested trace spanning all five services:
+- `extract_trip_requirements` — the LCEL chain that turns free text into structured requirements
+- the orchestrator's agent loop: LLM turns plus tool calls (`get_destination_shortlist`, `pick_destination`, `find_flight`, `book_flight`)
+- each specialist's `@traceable` function (`get_destinations`, `pick_destination`, `find_flight`, `book_flight`), nested under the matching tool call via trace-header propagation across the A2A hop
+- inputs, outputs, and latency for every step above
+- the retry loop, if a flight wasn't found on the first pick, visible as repeated `pick_destination` → `find_flight` tool calls with a growing `tried_iata_codes` list — not a different graph path
 
 ### Kafka UI — `http://kafka-ui.lab`
 

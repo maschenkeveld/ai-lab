@@ -5,7 +5,12 @@ on:
     branches: [main]
     paths:
       - "applications/**"
-      - "!applications/agents/travel-agency-langgraph/evals/**"
+      - "k8s/**"
+      - ".github/workflows/build-images.yml"
+  pull_request:
+    paths:
+      - "applications/**"
+      - "k8s/**"
       - ".github/workflows/build-images.yml"
   workflow_dispatch: {}
 
@@ -14,7 +19,48 @@ env:
   REGISTRY_NAMESPACE: ${{ github.repository }}
 
 jobs:
+  # PR-level checks (§21): fast, infra-free validation — no image build, no live cluster/agent
+  # needed. The full eval dataset against a live orchestrator stays a manual/scheduled step
+  # (see evals/run_eval.py and evals/tests/test_evaluators.py's module docstrings for why).
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+      - name: Lint Python (ruff)
+        run: uvx ruff check applications/agents applications/mcp-servers
+
+      - name: Unit-test deterministic evaluators
+        working-directory: applications/agents/travel-agency-langgraph/evals
+        run: uv run --group dev pytest tests/ -v
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - name: Vet Go REST servers and MCP dice-roller
+        run: |
+          for mod in applications/rest-servers/destinations applications/rest-servers/flights applications/rest-servers/book-flights applications/mcp-servers/dice-roller; do
+            (cd "$mod" && go vet ./...)
+          done
+
+      - name: Validate Kubernetes manifest YAML
+        run: |
+          uv run --with pyyaml python -c "
+          import pathlib, sys, yaml
+          failed = False
+          for path in pathlib.Path('k8s').rglob('*.yaml'):
+              try:
+                  list(yaml.safe_load_all(path.read_text()))
+              except yaml.YAMLError as e:
+                  print(f'{path}: {e}', file=sys.stderr)
+                  failed = True
+          sys.exit(1 if failed else 0)
+          "
+
   build:
+    needs: validate
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
