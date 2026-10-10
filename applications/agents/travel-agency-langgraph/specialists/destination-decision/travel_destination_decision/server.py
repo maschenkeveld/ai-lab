@@ -7,6 +7,10 @@ Returns:  {"selected_destination": {...}}
 Calls the dice-roller MCP server through agentgateway. The D20 result is used as an index
 (modulo the number of untried candidates) to pick the destination — genuinely random,
 no LLM call required.
+
+Set DICE_ROLL_DETERMINISTIC=true to always pick the first untried candidate instead (no
+dice roll, no MCP call) — used for reproducible regression evals that need to control
+which destination gets tried first. Normal/production deployments leave this unset.
 """
 
 import json
@@ -18,6 +22,7 @@ from typing import Any
 import uvicorn
 from fastapi import FastAPI, Request
 from langchain_mcp_adapters.client import MultiServerMCPClient
+
 from .otel import setup_otel
 
 setup_otel("travel-destination-decision")
@@ -28,6 +33,17 @@ from pydantic import BaseModel, Field
 AGENTGATEWAY_URL      = os.getenv("AGENTGATEWAY_URL", "http://agentgateway.lab")
 AGENT_NAME            = os.getenv("AGENT_NAME", "travel-destination-decision")
 PUBLIC_AGENT_BASE_URL = os.getenv("PUBLIC_AGENT_BASE_URL", "http://agentgateway.lab/a2a/destination-decision")
+
+# Deterministic evaluation mode (IMPROVEMENTS.md §11): the dice roll makes
+# regression evals noisy, since which destination gets picked (and therefore
+# whether find_flight/book_flight even get exercised for a given candidate)
+# is otherwise random. Default stays stochastic (normal production behavior,
+# unchanged) - evals that need a predictable pick point this service's
+# deployment at DICE_ROLL_DETERMINISTIC=true instead, which always takes the
+# first untried candidate (shortlist order) with no MCP call at all. This is
+# a service-level switch, not a per-request field, so the orchestrator's
+# tool-calling contract/prompt need no changes to support it.
+DICE_ROLL_DETERMINISTIC = os.getenv("DICE_ROLL_DETERMINISTIC", "false").lower() in ("1", "true", "yes")
 
 _mcp_client: MultiServerMCPClient | None = None
 _tools: list = []
@@ -98,7 +114,7 @@ async def pick_destination(payload: dict[str, Any]) -> dict[str, Any]:
     tried      = set(payload.get("tried_iata_codes") or [])
     candidates = [d for d in shortlist if d.get("airport_iata_codes", [""])[0] not in tried] or shortlist
 
-    if len(candidates) == 1:
+    if len(candidates) == 1 or DICE_ROLL_DETERMINISTIC:
         return {"selected_destination": candidates[0]}
 
     # Roll D20 via MCP — result is 1..20; map to a candidate index.

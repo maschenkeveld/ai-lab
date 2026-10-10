@@ -17,6 +17,7 @@ from typing import Any
 import uvicorn
 from fastapi import FastAPI, Request
 from langchain_mcp_adapters.client import MultiServerMCPClient
+
 from .otel import setup_otel
 
 setup_otel("travel-flight-finder")

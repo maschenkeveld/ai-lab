@@ -23,6 +23,7 @@ import uvicorn
 from fastapi import FastAPI, Request
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_openai import OpenAIEmbeddings
+
 from .otel import setup_otel
 
 setup_otel("travel-destination")
