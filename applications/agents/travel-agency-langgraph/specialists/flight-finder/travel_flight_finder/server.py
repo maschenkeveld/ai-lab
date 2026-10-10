@@ -9,6 +9,7 @@ Calls the flights MCP adapter through agentgateway using MultiServerMCPClient.
 """
 
 import json
+import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
@@ -24,6 +25,12 @@ setup_otel("travel-flight-finder")
 from langsmith import traceable
 from langsmith.run_helpers import tracing_context
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
+
+# Logs each call's input/output to stdout — visibility when running this service in a
+# terminal (local dev, demos). Toggle off with VERBOSE=false.
+VERBOSE = os.getenv("VERBOSE", "true").lower() in ("1", "true", "yes")
 
 AGENTGATEWAY_URL      = os.getenv("AGENTGATEWAY_URL", "http://agentgateway.lab")
 AGENT_NAME            = os.getenv("AGENT_NAME", "travel-flight-finder")
@@ -93,6 +100,8 @@ async def jsonrpc(request: JsonRpcRequest, http_request: Request) -> dict[str, A
 
 @traceable(name="find_flight")
 async def find_flight(payload: dict[str, Any]) -> dict[str, Any]:
+    if VERBOSE:
+        logger.info("[flight-finder] searching: %s -> %s on %s", payload.get("origin"), payload.get("to_iata"), payload.get("date"))
     try:
         tool = next(t for t in _tools if t.name == "flight_price")
         raw = await tool.ainvoke({
@@ -107,8 +116,13 @@ async def find_flight(payload: dict[str, Any]) -> dict[str, Any]:
         # rest-flights, which surfaces here as a string, not an exception). Only a real
         # flight object counts - anything else means no flight, matching this function's
         # documented {"flight": null} contract instead of leaking an error string into it.
-        return {"flight": data if isinstance(data, dict) else None}
+        flight = data if isinstance(data, dict) else None
+        if VERBOSE:
+            logger.info("[flight-finder] result: %s", f"{flight.get('flight_number')} for {flight.get('price')} {flight.get('currency')}" if flight else "no flight found")
+        return {"flight": flight}
     except Exception:
+        if VERBOSE:
+            logger.info("[flight-finder] result: error, treating as no flight found")
         return {"flight": None}
 
 

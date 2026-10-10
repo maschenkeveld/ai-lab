@@ -33,6 +33,10 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
+# Logs each call's input/output to stdout — visibility when running this service in a
+# terminal (local dev, demos). Toggle off with VERBOSE=false.
+VERBOSE = os.getenv("VERBOSE", "true").lower() in ("1", "true", "yes")
+
 AGENTGATEWAY_URL      = os.getenv("AGENTGATEWAY_URL", "http://agentgateway.lab")
 AGENT_NAME            = os.getenv("AGENT_NAME", "travel-destination")
 PUBLIC_AGENT_BASE_URL = os.getenv("PUBLIC_AGENT_BASE_URL", "http://agentgateway.lab/a2a/destination")
@@ -123,6 +127,9 @@ async def get_destinations(payload: dict[str, Any]) -> dict[str, Any]:
     activities = payload.get("activities", [])
     limit      = int(payload.get("limit", 5))
 
+    if VERBOSE:
+        logger.info("[destination] shortlisting: origin=%s budget=%s vibes=%s activities=%s", origin, budget, vibes, activities)
+
     tool = next((t for t in _tools if t.name == "list_destinations"), None)
     if tool is None:
         return {"destinations": []}
@@ -139,7 +146,10 @@ async def get_destinations(payload: dict[str, Any]) -> dict[str, Any]:
         if origin not in d.get("airport_iata_codes", [])
     ]
     destinations = await rank_by_similarity(candidates, vibes, activities, budget)
-    return {"destinations": destinations[:limit]}
+    result = destinations[:limit]
+    if VERBOSE:
+        logger.info("[destination] shortlist: %s", [d.get("name") for d in result])
+    return {"destinations": result}
 
 
 @traceable(name="rank_by_similarity")

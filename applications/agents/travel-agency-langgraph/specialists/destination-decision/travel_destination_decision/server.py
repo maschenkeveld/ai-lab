@@ -14,6 +14,7 @@ which destination gets tried first. Normal/production deployments leave this uns
 """
 
 import json
+import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
@@ -29,6 +30,12 @@ setup_otel("travel-destination-decision")
 from langsmith import traceable
 from langsmith.run_helpers import tracing_context
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
+
+# Logs each call's input/output to stdout — visibility when running this service in a
+# terminal (local dev, demos). Toggle off with VERBOSE=false.
+VERBOSE = os.getenv("VERBOSE", "true").lower() in ("1", "true", "yes")
 
 AGENTGATEWAY_URL      = os.getenv("AGENTGATEWAY_URL", "http://agentgateway.lab")
 AGENT_NAME            = os.getenv("AGENT_NAME", "travel-destination-decision")
@@ -115,7 +122,10 @@ async def pick_destination(payload: dict[str, Any]) -> dict[str, Any]:
     candidates = [d for d in shortlist if d.get("airport_iata_codes", [""])[0] not in tried] or shortlist
 
     if len(candidates) == 1 or DICE_ROLL_DETERMINISTIC:
-        return {"selected_destination": candidates[0]}
+        selected = candidates[0]
+        if VERBOSE:
+            logger.info("[destination-decision] only one candidate (or deterministic): %s", selected.get("name"))
+        return {"selected_destination": selected}
 
     # Roll D20 via MCP — result is 1..20; map to a candidate index.
     roll_tool = next((t for t in _tools if "20" in t.name), None)
@@ -126,7 +136,13 @@ async def pick_destination(payload: dict[str, Any]) -> dict[str, Any]:
         roll_result = data.get("result", 1) if isinstance(data, dict) else 1
 
     index = (roll_result - 1) % len(candidates)
-    return {"selected_destination": candidates[index]}
+    selected = candidates[index]
+    if VERBOSE:
+        logger.info(
+            "[destination-decision] rolled %s from %s candidates (excluding %s) -> %s",
+            roll_result, len(candidates), sorted(tried) or "none", selected.get("name"),
+        )
+    return {"selected_destination": selected}
 
 
 def _parse(raw: Any) -> Any:

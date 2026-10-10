@@ -51,6 +51,8 @@ from langsmith.run_helpers import get_current_run_tree
 from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel, Field
 
+from .verbose import CALLBACKS, VERBOSE, truncate
+
 logger = logging.getLogger(__name__)
 
 
@@ -297,30 +299,45 @@ async def get_agent():
 
 def _run_config(thread_id: str) -> dict[str, Any]:
     """Shared RunnableConfig for a single trip-planning run: thread_id for checkpointing,
-    plus the metadata LangSmith attaches to the resulting trace (LangSmith §5)."""
+    plus the metadata LangSmith attaches to the resulting trace (LangSmith §5), plus the
+    console trace callback (verbose.py) that prints each tool call when VERBOSE is set."""
     return {
         "configurable": {"thread_id": thread_id},
         "metadata": {**RUN_METADATA, "thread_id": thread_id},
         "run_name": SERVICE_NAME,
+        "callbacks": CALLBACKS,
     }
 
 
 async def run_agent(prompt: str, thread_id: str) -> dict[str, Any]:
     """Extract requirements, run the agent to completion, and shape a backward-compatible result dict."""
+    if VERBOSE:
+        logger.info("=== [%s] New request: %s ===", thread_id, truncate(prompt))
     requirements = extract_requirements(prompt, build_llm())
+    if VERBOSE:
+        logger.info("  requirements: %s", requirements)
     agent = await get_agent()
     initial_message = HumanMessage(content=json.dumps({"trip_request": prompt, "requirements": requirements}))
     result = await agent.ainvoke({"messages": [initial_message]}, config=_run_config(thread_id))
-    return summarize_result(result, requirements)
+    summary = summarize_result(result, requirements)
+    if VERBOSE:
+        logger.info("=== [%s] Done: status=%s ===", thread_id, summary["status"])
+    return summary
 
 
 async def stream_agent(prompt: str, thread_id: str) -> AsyncIterator[dict[str, Any]]:
     """Stream agent execution events (token chunks, tool start/end) for a single trip-planning run."""
+    if VERBOSE:
+        logger.info("=== [%s] New streaming request: %s ===", thread_id, truncate(prompt))
     requirements = extract_requirements(prompt, build_llm())
+    if VERBOSE:
+        logger.info("  requirements: %s", requirements)
     agent = await get_agent()
     initial_message = HumanMessage(content=json.dumps({"trip_request": prompt, "requirements": requirements}))
     async for event in agent.astream_events({"messages": [initial_message]}, config=_run_config(thread_id), version="v2"):
         yield event
+    if VERBOSE:
+        logger.info("=== [%s] Streaming request done ===", thread_id)
 
 
 def summarize_result(result: dict[str, Any], requirements: dict[str, Any]) -> dict[str, Any]:

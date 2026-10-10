@@ -8,6 +8,7 @@ Calls the book-flights MCP adapter through agentgateway using MultiServerMCPClie
 """
 
 import json
+import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
@@ -23,6 +24,12 @@ setup_otel("travel-flight-booker")
 from langsmith import traceable
 from langsmith.run_helpers import tracing_context
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
+
+# Logs each call's input/output to stdout — visibility when running this service in a
+# terminal (local dev, demos). Toggle off with VERBOSE=false.
+VERBOSE = os.getenv("VERBOSE", "true").lower() in ("1", "true", "yes")
 
 AGENTGATEWAY_URL      = os.getenv("AGENTGATEWAY_URL", "http://agentgateway.lab")
 AGENT_NAME            = os.getenv("AGENT_NAME", "travel-flight-booker")
@@ -92,6 +99,8 @@ async def jsonrpc(request: JsonRpcRequest, http_request: Request) -> dict[str, A
 
 @traceable(name="book_flight")
 async def book_flight(payload: dict[str, Any]) -> dict[str, Any]:
+    if VERBOSE:
+        logger.info("[flight-booker] booking: %s, %s -> %s on %s", payload.get("passenger_name"), payload.get("from"), payload.get("to"), payload.get("date"))
     try:
         tool = next(t for t in _tools if t.name == "create_booking")
         raw = await tool.ainvoke({
@@ -105,8 +114,12 @@ async def book_flight(payload: dict[str, Any]) -> dict[str, Any]:
         # real booking object counts as success, matching this function's {"booking": {...}}
         # contract instead of leaking a raw error string into it.
         booking = data.get("booking", data) if isinstance(data, dict) else None
+        if VERBOSE:
+            logger.info("[flight-booker] result: %s", f"confirmed {booking.get('booking_code')}" if booking else "booking failed")
         return {"booking": booking}
     except Exception:
+        if VERBOSE:
+            logger.info("[flight-booker] result: error, booking failed")
         return {"booking": None}
 
 
