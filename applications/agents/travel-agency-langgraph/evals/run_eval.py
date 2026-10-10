@@ -136,31 +136,51 @@ THREAD_STATE_FOLLOWUP = "What destination did you just book for me?"
 
 def check_thread_state() -> dict[str, Any]:
     """Book a trip on THREAD_STATE_SAME_ID, then ask a follow-up question that only makes
-    sense with that turn's context on the same thread_id (should recall the destination) and
-    on a different thread_id (should NOT leak it - there's no prior turn on that thread).
+    sense with that turn's context on the same thread_id (should recall the booking) and on
+    a different thread_id (should NOT leak it - there's no prior turn on that thread).
 
-    Caveat, stated plainly rather than papered over: the orchestrator's SYSTEM_PROMPT tells
-    the agent to autonomously plan+book "one trip per conversation" - it has no explicit
-    instruction for answering a conversational follow-up instead of starting a new booking
-    flow. If the follow-up turn just re-runs the full tool chain instead of answering from
-    history, that's a real, informative finding about this architecture (worth a design
-    discussion per IMPROVEMENTS.md §26), not a bug in this check - the isolation half of the
-    check (other_thread_does_not_leak_state) still holds either way.
+    Confirmed live against shared-pve-home, and worth stating plainly rather than papering
+    over (IMPROVEMENTS.md §26): "same_thread_recalls_prior_turn" fails even on a genuinely
+    continued thread. The Postgres checkpointer does persist the full message history across
+    calls on one thread_id, but the orchestrator's SYSTEM_PROMPT only ever says to
+    autonomously plan+book "one trip per conversation" and "infer sensible defaults and
+    proceed autonomously" - it has no instruction for recognizing a follow-up question and
+    answering from history instead. In practice, every call - including the second call on
+    the SAME thread_id - re-extracts requirements from just that call's own prompt text
+    (falling back to schema defaults when the prompt doesn't look like a trip request) and
+    the agent re-runs the entire shortlist→pick→find→book sequence again, producing a brand
+    new, unrelated booking. State persistence and conversational memory are not the same
+    thing here: the checkpointer works, but nothing in this architecture uses it to answer
+    "what did you just book me" conversationally. That's a real gap worth a design
+    discussion, not a bug in this check - and it means a fresh thread_id's independent
+    re-booking can legitimately land on the same destination as a prior thread's by chance
+    (confirmed below), which is why isolation is checked via booking code, not destination.
+
+    It did, however, expose a real bug in an earlier version of this check: isolation was
+    compared by destination name, and with only ~5 shortlist candidates plus a stochastic
+    dice roll in production (no DICE_ROLL_DETERMINISTIC on shared-pve-home), two independent
+    fresh bookings landed on the same destination by sheer chance (confirmed by manually
+    replaying turn 3 - it ran its own full shortlist→pick→find→book sequence and produced a
+    different, unrelated booking code). Comparing the booking code instead fixes this -
+    collision odds across independent 6-character alphanumeric codes are negligible, so a
+    match is a real signal of leaked state rather than coincidence.
     """
     turn1 = _call_orchestrator(THREAD_STATE_BOOKING_REQUEST, THREAD_STATE_SAME_ID)
     destination_name = (turn1.get("selected_destination") or {}).get("name")
+    booking_code = (turn1.get("booking") or {}).get("booking_code")
 
     turn2 = _call_orchestrator(THREAD_STATE_FOLLOWUP, THREAD_STATE_SAME_ID)
     turn3 = _call_orchestrator(THREAD_STATE_FOLLOWUP, THREAD_STATE_OTHER_ID)
 
-    recalls = bool(destination_name) and destination_name.lower() in (turn2.get("answer") or "").lower()
-    isolated = bool(destination_name) and destination_name.lower() not in (turn3.get("answer") or "").lower()
+    recalls = bool(booking_code) and booking_code in (turn2.get("answer") or "")
+    leaked = bool(booking_code) and booking_code in (turn3.get("answer") or "")
 
     return {
         "turn1_status": turn1.get("status"),
         "destination_name": destination_name,
+        "booking_code": booking_code,
         "same_thread_recalls_prior_turn": recalls,
-        "other_thread_does_not_leak_state": isolated,
+        "other_thread_does_not_leak_state": not leaked,
     }
 
 
