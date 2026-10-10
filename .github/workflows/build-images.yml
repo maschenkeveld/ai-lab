@@ -24,8 +24,21 @@ jobs:
   # (see evals/run_eval.py and evals/tests/test_evaluators.py's module docstrings for why).
   validate:
     runs-on: ubuntu-latest
+    outputs:
+      images-affected: ${{ steps.filter.outputs.images-affected }}
     steps:
       - uses: actions/checkout@v4
+
+      # evals/** has no built image (see matrix in the build job below) — on an evals-only
+      # change, skip the build job below instead of rebuilding all 12 images for nothing.
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            images-affected:
+              - "applications/**"
+              - "!applications/agents/travel-agency-langgraph/evals/**"
+              - "k8s/**"
 
       - uses: astral-sh/setup-uv@v3
       - name: Lint Python (ruff)
@@ -60,7 +73,9 @@ jobs:
 
   build:
     needs: validate
-    if: github.event_name != 'pull_request'
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && needs.validate.outputs.images-affected == 'true')
     runs-on: ubuntu-latest
     permissions:
       contents: read
