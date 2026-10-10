@@ -4,6 +4,8 @@ from typing import Annotated, Any
 import httpx
 from fastmcp import FastMCP
 from pydantic import Field
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from .otel import setup_otel
 
@@ -15,6 +17,11 @@ FLIGHTS_BASE_URL = os.getenv(
 )
 
 mcp = FastMCP("flights")
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health(request: Request) -> JSONResponse:
+    return JSONResponse({"status": "ok", "agent": "mcp-flights-adapter"})
 
 
 @mcp.tool
