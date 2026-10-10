@@ -45,7 +45,9 @@ from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.types import Command, interrupt
 from langsmith import traceable
 from langsmith.run_helpers import get_current_run_tree
 from psycopg_pool import AsyncConnectionPool
@@ -206,6 +208,11 @@ def find_flight(origin: str, to_iata: str, date: str) -> str:
 def book_flight(passenger_name: str, from_: str, to: str, date: str) -> str:
     """Book the previously-found flight for the passenger. Only call this after find_flight succeeded.
 
+    This pauses the run for human approval before actually booking — a human must approve or
+    reject via POST /a2a/travel-orchestrator/approve with this run's thread_id before the
+    booking happens (or is skipped). Call it once you're ready to book; you'll see the
+    outcome (booked, or cancelled by the reviewer) once a decision is made.
+
     Args:
         passenger_name: name to book the flight under.
         from_: origin airport IATA code (the flight's "from").
@@ -213,11 +220,26 @@ def book_flight(passenger_name: str, from_: str, to: str, date: str) -> str:
         date: travel date as YYYY-MM-DD.
 
     Returns:
-        JSON string {"booking": {...}}.
+        JSON string {"booking": {...}, "approval": "approved"} on success, or
+        {"booking": null, "approval": "rejected"} if the human reviewer declined.
     """
+    # Human-in-the-loop gate: pauses this run (persisted via the checkpointer - see
+    # build_checkpointer) until a human resumes it with an approve/reject decision. The
+    # booking itself — the one irreversible, money-committing action in this workflow — never
+    # happens without that decision.
+    decision = interrupt({
+        "action": "approve_booking",
+        "passenger_name": passenger_name,
+        "from": from_,
+        "to": to,
+        "date": date,
+    })
+    if not decision.get("approved"):
+        return json.dumps({"booking": None, "approval": "rejected"})
     result = call_specialist(SPECIALIST_FLIGHT_BOOKER, {
         "passenger_name": passenger_name, "from": from_, "to": to, "date": date,
     })
+    result["approval"] = "approved"
     return json.dumps(result)
 
 
@@ -233,12 +255,16 @@ calling tools in this order:
 you've tried so far in tried_iata_codes, then call find_flight again for the new pick.
    - If every destination in the shortlist has been tried with no flight found, stop and tell the \
 user no flights were available, listing the shortlist you considered.
-4. book_flight — as soon as find_flight succeeds, book that flight immediately.
+4. book_flight — as soon as find_flight succeeds, call this immediately. It pauses for human \
+approval before the booking actually happens; you won't see the outcome until a human decides.
 
-Once booked, reply with a human-readable summary: the shortlist you considered, the destination you \
-picked, the flight details (flight number, route, date, price), and the booking confirmation (code, \
-status). Never call book_flight before find_flight has succeeded for that destination. Do not ask the \
-user clarifying questions — infer sensible defaults and proceed autonomously."""
+Once book_flight returns, reply based on its outcome: if booked, give a human-readable summary \
+(the shortlist you considered, the destination you picked, the flight details — flight number, \
+route, date, price — and the booking confirmation code/status); if the human reviewer rejected \
+it, say plainly that the booking was not made and no confirmation exists. Never call book_flight \
+before find_flight has succeeded for that destination. Do not ask the user clarifying questions \
+— infer sensible defaults and proceed autonomously (the human-approval step for booking is the \
+one deliberate exception to that)."""
 
 
 # ---------------------------------------------------------------------------
@@ -251,12 +277,21 @@ user clarifying questions — infer sensible defaults and proceed autonomously."
 _pool: AsyncConnectionPool | None = None
 _agent = None
 
+# In-memory registry of runs currently paused at book_flight's approval interrupt, so a human
+# reviewer (CLI tool, UI, whatever calls /approve) can discover what's pending without already
+# knowing a thread_id out of band. Scoped to this process's lifetime, same as the orchestrator's
+# single-replica constraint already documented above for the checkpointer itself.
+_pending_approvals: dict[str, dict[str, Any]] = {}
+
 
 async def build_checkpointer():
     """A Postgres-backed checkpointer for cross-request conversation memory.
 
-    Falls back to no checkpointer (stateless runs) if Postgres isn't reachable,
-    so the agent still works in environments without the llm-analytics Postgres.
+    Falls back to an in-memory checkpointer (lost on restart, but otherwise fully
+    functional for the lifetime of this pod) if Postgres isn't reachable, rather than no
+    checkpointer at all. This matters beyond conversation memory: book_flight's human-approval
+    interrupt (see below) requires *some* checkpointer to persist the paused run - with no
+    checkpointer, a run could never actually pause for approval, it could only fail outright.
     """
     global _pool
     pool = AsyncConnectionPool(
@@ -277,9 +312,9 @@ async def build_checkpointer():
         _pool = pool
         return checkpointer
     except Exception:
-        logger.warning("Postgres checkpointer unavailable at %s — falling back to stateless runs", CHECKPOINT_DB_URL, exc_info=True)
+        logger.warning("Postgres checkpointer unavailable at %s — falling back to an in-memory checkpointer", CHECKPOINT_DB_URL, exc_info=True)
         await pool.close()
-        return None
+        return InMemorySaver()
 
 
 async def build_agent():
@@ -310,7 +345,8 @@ def _run_config(thread_id: str) -> dict[str, Any]:
 
 
 async def run_agent(prompt: str, thread_id: str) -> dict[str, Any]:
-    """Extract requirements, run the agent to completion, and shape a backward-compatible result dict."""
+    """Extract requirements, run the agent until it completes or pauses for approval, and
+    shape a backward-compatible result dict."""
     if VERBOSE:
         logger.info("=== [%s] New request: %s ===", thread_id, truncate(prompt))
     requirements = extract_requirements(prompt, build_llm())
@@ -319,10 +355,35 @@ async def run_agent(prompt: str, thread_id: str) -> dict[str, Any]:
     agent = await get_agent()
     initial_message = HumanMessage(content=json.dumps({"trip_request": prompt, "requirements": requirements}))
     result = await agent.ainvoke({"messages": [initial_message]}, config=_run_config(thread_id))
+    if "__interrupt__" in result:
+        summary = summarize_pending(result, requirements)
+        _pending_approvals[thread_id] = summary["pending_approval"]
+        if VERBOSE:
+            logger.info("=== [%s] Awaiting approval: %s ===", thread_id, summary["pending_approval"])
+        return summary
     summary = summarize_result(result, requirements)
     if VERBOSE:
         logger.info("=== [%s] Done: status=%s ===", thread_id, summary["status"])
     return summary
+
+
+async def resume_agent(thread_id: str, approved: bool) -> dict[str, Any]:
+    """Resume a run paused at book_flight's human-approval interrupt with a human decision."""
+    if VERBOSE:
+        logger.info("=== [%s] Resuming with approved=%s ===", thread_id, approved)
+    agent = await get_agent()
+    result = await agent.ainvoke(Command(resume={"approved": approved}), config=_run_config(thread_id))
+    _pending_approvals.pop(thread_id, None)
+    requirements = _requirements_from_messages(result.get("messages") or [])
+    summary = summarize_result(result, requirements)
+    if VERBOSE:
+        logger.info("=== [%s] Done: status=%s ===", thread_id, summary["status"])
+    return summary
+
+
+def list_pending_approvals() -> dict[str, dict[str, Any]]:
+    """All runs currently paused awaiting a human booking decision, keyed by thread_id."""
+    return dict(_pending_approvals)
 
 
 async def stream_agent(prompt: str, thread_id: str) -> AsyncIterator[dict[str, Any]]:
@@ -340,14 +401,11 @@ async def stream_agent(prompt: str, thread_id: str) -> AsyncIterator[dict[str, A
         logger.info("=== [%s] Streaming request done ===", thread_id)
 
 
-def summarize_result(result: dict[str, Any], requirements: dict[str, Any]) -> dict[str, Any]:
-    """Pull the final answer, each tool's last result, and the tool-call sequence out of the
-    agent's message history (IMPROVEMENTS.md §14: a structured result alongside the prose
-    answer, so callers - including the eval harness - don't have to re-derive outcome/sequence
-    from free text)."""
-    messages = result.get("messages") or []
-    answer = messages[-1].content if messages else ""
+def _scan_tool_calls(messages: list[Any]) -> dict[str, Any]:
+    """Shared by summarize_result/summarize_pending: pull each tool's result and the full
+    tool-call sequence out of the agent's message history."""
     shortlist = selected_destination = flight = booking = None
+    rejected = False
     tool_calls: list[dict[str, Any]] = []
     for message in messages:
         if not isinstance(message, ToolMessage):
@@ -367,17 +425,73 @@ def summarize_result(result: dict[str, Any], requirements: dict[str, Any]) -> di
             flight = payload.get("flight")
         elif message.name == "book_flight":
             booking = payload.get("booking")
-    status = "booked" if booking is not None else ("no_flight" if shortlist is not None else "failed")
+            rejected = payload.get("approval") == "rejected"
+    return {
+        "shortlist": shortlist, "selected_destination": selected_destination,
+        "flight": flight, "booking": booking, "rejected": rejected, "tool_calls": tool_calls,
+    }
+
+
+def summarize_result(result: dict[str, Any], requirements: dict[str, Any]) -> dict[str, Any]:
+    """Pull the final answer, each tool's last result, and the tool-call sequence out of the
+    agent's message history (IMPROVEMENTS.md §14: a structured result alongside the prose
+    answer, so callers - including the eval harness - don't have to re-derive outcome/sequence
+    from free text)."""
+    messages = result.get("messages") or []
+    answer = messages[-1].content if messages else ""
+    scan = _scan_tool_calls(messages)
+    if scan["booking"] is not None:
+        status = "booked"
+    elif scan["rejected"]:
+        status = "rejected"
+    elif scan["shortlist"] is not None:
+        status = "no_flight"
+    else:
+        status = "failed"
     return {
         "answer": answer,
         "requirements": requirements,
-        "shortlist": shortlist,
-        "selected_destination": selected_destination,
-        "flight": flight,
-        "booking": booking,
+        "shortlist": scan["shortlist"],
+        "selected_destination": scan["selected_destination"],
+        "flight": scan["flight"],
+        "booking": scan["booking"],
         "status": status,
-        "tool_calls": tool_calls,
+        "tool_calls": scan["tool_calls"],
+        "pending_approval": None,
     }
+
+
+def summarize_pending(result: dict[str, Any], requirements: dict[str, Any]) -> dict[str, Any]:
+    """Shape a result for a run paused at book_flight's human-approval interrupt: everything up
+    to the pending booking is already known from completed tool calls; only the booking itself
+    is on hold until a human resolves it via POST /a2a/travel-orchestrator/approve."""
+    messages = result.get("messages") or []
+    scan = _scan_tool_calls(messages)
+    pending = result["__interrupt__"][0].value
+    return {
+        "answer": "Awaiting human approval before booking — see pending_approval for details.",
+        "requirements": requirements,
+        "shortlist": scan["shortlist"],
+        "selected_destination": scan["selected_destination"],
+        "flight": scan["flight"],
+        "booking": None,
+        "status": "awaiting_approval",
+        "tool_calls": scan["tool_calls"],
+        "pending_approval": pending,
+    }
+
+
+def _requirements_from_messages(messages: list[Any]) -> dict[str, Any]:
+    """Recover the requirements dict a paused run was started with, from its first message —
+    used when resuming, so resume_agent doesn't need the original prompt re-supplied or
+    re-extracted (which would needlessly call the LLM again with no new information)."""
+    for message in messages:
+        if isinstance(message, HumanMessage):
+            try:
+                return json.loads(message.content).get("requirements", {})
+            except (TypeError, ValueError):
+                return {}
+    return {}
 
 
 def serialize_event(event: dict[str, Any]) -> dict[str, Any]:

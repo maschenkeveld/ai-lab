@@ -10,7 +10,13 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from .graph import run_agent, serialize_event, stream_agent
+from .graph import (
+    list_pending_approvals,
+    resume_agent,
+    run_agent,
+    serialize_event,
+    stream_agent,
+)
 from .otel import setup_otel
 
 setup_otel("travel-orchestrator")
@@ -80,6 +86,7 @@ async def jsonrpc(request: JsonRpcRequest) -> dict[str, Any]:
                 "flight": result["flight"],
                 "booking": result["booking"],
                 "tool_calls": result["tool_calls"],
+                "pending_approval": result["pending_approval"],
             },
         },
     }
@@ -107,6 +114,28 @@ async def plan_trip_stream(payload: dict[str, Any]) -> StreamingResponse:
         yield f"data: {json.dumps({'event': 'end'})}\n\n"
 
     return StreamingResponse(event_source(), media_type="text/event-stream")
+
+
+class ApprovalRequest(BaseModel):
+    thread_id: str
+    approved: bool
+
+
+@app.get("/pending")
+@app.get("/a2a/travel-orchestrator/pending")
+def pending_approvals() -> dict[str, Any]:
+    """Runs currently paused awaiting a human booking decision — lets a reviewer (CLI tool,
+    UI) discover what's waiting without already knowing a thread_id (IMPROVEMENTS.md's
+    human-in-the-loop requirement: book_flight pauses here until approved or rejected)."""
+    return {"pending": list_pending_approvals()}
+
+
+@app.post("/approve")
+@app.post("/a2a/travel-orchestrator/approve")
+async def approve(payload: ApprovalRequest) -> dict[str, Any]:
+    """Resume a paused run with a human's approve/reject decision for its pending booking."""
+    result = await resume_agent(payload.thread_id, payload.approved)
+    return {"thread_id": payload.thread_id, **result}
 
 
 def extract_prompt(params: dict[str, Any]) -> str:

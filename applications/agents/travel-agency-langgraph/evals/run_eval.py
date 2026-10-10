@@ -124,6 +124,32 @@ def _call_orchestrator(trip_request: Any, thread_id: str) -> dict[str, Any]:
         "flight": metadata.get("flight"),
         "booking": metadata.get("booking"),
         "tool_calls": metadata.get("tool_calls"),
+        "pending_approval": metadata.get("pending_approval"),
+    }
+
+
+def _approve(thread_id: str, approved: bool) -> dict[str, Any]:
+    """POST a human decision for a run paused at book_flight's approval interrupt, and return
+    its result in the same shape _call_orchestrator does (so evaluators don't care which path
+    produced a given example's outputs)."""
+    response = httpx.post(
+        f"{ORCHESTRATOR_URL}/a2a/travel-orchestrator/approve",
+        json={"thread_id": thread_id, "approved": approved},
+        timeout=90.0,
+    )
+    response.raise_for_status()
+    body = response.json()
+    return {
+        "trip_request": None,
+        "answer": body.get("answer"),
+        "status": body.get("status"),
+        "requirements": body.get("requirements"),
+        "shortlist": body.get("shortlist"),
+        "selected_destination": body.get("selected_destination"),
+        "flight": body.get("flight"),
+        "booking": body.get("booking"),
+        "tool_calls": body.get("tool_calls"),
+        "pending_approval": body.get("pending_approval"),
     }
 
 
@@ -131,8 +157,19 @@ def _call_orchestrator(trip_request: Any, thread_id: str) -> dict[str, Any]:
 def target(inputs: dict, thread_id: str | None = None) -> dict:
     """evaluate()'s per-example target. Each example gets its own fresh thread_id (unless one
     is passed explicitly, as check_thread_state does) so concurrent examples can't bleed
-    checkpointed state into each other."""
-    return _call_orchestrator(inputs["trip_request"], thread_id or str(uuid.uuid4()))
+    checkpointed state into each other.
+
+    book_flight now pauses for human approval (the HITL requirement) before any booking
+    happens — these dataset examples are about requirements extraction, retries, etc., not
+    about the approval gate itself, so this auto-approves on their behalf and scores the
+    post-approval outcome. The approval mechanism itself is exercised directly and for real
+    by check_human_approval below, which specifically tests both the approve and reject paths.
+    """
+    tid = thread_id or str(uuid.uuid4())
+    result = _call_orchestrator(inputs["trip_request"], tid)
+    if result.get("status") == "awaiting_approval":
+        result = _approve(tid, approved=True)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +236,51 @@ def check_thread_state() -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Human-in-the-loop check: book_flight's approval interrupt. Also sequential/
+# not through evaluate() — approving and rejecting are two separate full runs,
+# not independent dataset rows, and rejecting specifically needs to assert a
+# negative (the booking specialist is never reached), which only a live,
+# controlled call-then-decide sequence can show.
+# ---------------------------------------------------------------------------
+
+HITL_APPROVE_REQUEST = {
+    "passenger_name": "HitlApprove", "origin": "AMS", "date": "2026-09-20",
+    "activities": ["museums"], "vibes": ["culture"], "budget_level": "high",
+}
+HITL_REJECT_REQUEST = {
+    "passenger_name": "HitlReject", "origin": "AMS", "date": "2026-09-21",
+    "activities": ["museums"], "vibes": ["culture"], "budget_level": "high",
+}
+
+
+def check_human_approval() -> dict[str, Any]:
+    """Exercises both outcomes of the book_flight human-approval gate for real: a normal
+    booking request must pause with the pending booking's details before anything is booked,
+    approving it must complete the booking, and rejecting a separate request must leave it
+    unbooked rather than booking anyway. This is the assignment's human-in-the-loop
+    requirement — tested directly, not just implemented."""
+    paused = _call_orchestrator(HITL_APPROVE_REQUEST, "eval-hitl-approve")
+    pauses_for_approval = paused.get("status") == "awaiting_approval" and paused.get("booking") is None and bool(paused.get("pending_approval"))
+
+    approved_result = _approve("eval-hitl-approve", approved=True)
+    approval_completes_booking = approved_result.get("status") == "booked" and approved_result.get("booking") is not None
+
+    paused2 = _call_orchestrator(HITL_REJECT_REQUEST, "eval-hitl-reject")
+    rejected_result = _approve("eval-hitl-reject", approved=False)
+    rejection_blocks_booking = (
+        paused2.get("status") == "awaiting_approval"
+        and rejected_result.get("status") == "rejected"
+        and rejected_result.get("booking") is None
+    )
+
+    return {
+        "pauses_for_approval": pauses_for_approval,
+        "approval_completes_booking": approval_completes_booking,
+        "rejection_blocks_booking": rejection_blocks_booking,
+    }
+
+
 if __name__ == "__main__":
     client = Client()
     dataset_name = ensure_dataset(client)
@@ -213,3 +295,6 @@ if __name__ == "__main__":
 
     print("\n--- thread-state check (sequential, not part of the LangSmith experiment) ---")
     print(json.dumps(check_thread_state(), indent=2))
+
+    print("\n--- human-in-the-loop approval check (sequential, not part of the LangSmith experiment) ---")
+    print(json.dumps(check_human_approval(), indent=2))
