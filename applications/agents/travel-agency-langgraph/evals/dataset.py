@@ -55,6 +55,15 @@ Which destination gets picked first is normally a dice roll (destination-decisio
 server.py). Evals that care about *which* destination is tried (the no_flight case here
 doesn't — every candidate fails identically, so pick order is irrelevant) should point
 ORCHESTRATOR_URL at a deployment with destination-decision's DICE_ROLL_DETERMINISTIC=true.
+
+## "food" belongs in vibes, not activities
+
+Confirmed live: `activities: ["food"]` always produces an empty shortlist, because the
+destinations backend's activities field never literally contains "food" (it's modeled as a
+*vibe* - several mid-budget destinations have `vibes: [..., "food"]`) and the shortlist
+filter requires an exact string match. `TripRequirements`'s own field description used to
+list "food" as a valid activity (fixed in graph.py); examples here that want a food-focused
+trip put "food" in `vibes` instead.
 """
 
 from typing import Any
@@ -89,7 +98,7 @@ HAPPY_PATH: list[Example] = [
         "inputs": {
             "trip_request": {
                 "passenger_name": "Priya", "origin": "DUB", "date": "2026-11-03",
-                "activities": ["food"], "vibes": ["nightlife"], "budget_level": "mid",
+                "activities": ["walking"], "vibes": ["nightlife", "food"], "budget_level": "mid",
             }
         },
         "reference_outputs": {"must_book": True, "origin": "DUB", "expect_retry": False},
@@ -141,7 +150,7 @@ MISSING_VALUES: list[Example] = [
         # omits date -> should default to 2026-07-15
         "inputs": {"trip_request": {
             "passenger_name": "Nora", "origin": "ARN",
-            "activities": ["food"], "vibes": ["nightlife"], "budget_level": "mid",
+            "activities": ["walking"], "vibes": ["nightlife", "food"], "budget_level": "mid",
         }},
         "reference_outputs": {"must_book": True, "origin": "ARN", "expect_retry": False},
         "metadata": {"category": "missing_values", "omitted": ["date"]},

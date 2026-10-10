@@ -109,10 +109,17 @@ class TripRequirements(BaseModel):
     budget_level: str = Field(description="One of 'low', 'mid', 'high'. Default 'high' if not mentioned.")
     vibes: list[str] = Field(
         description="Desired trip vibes, chosen from: culture, city, food, design, nature, relax, "
-                     "nightlife. Default ['culture', 'city'] if none are mentioned."
+                     "nightlife, beach. Default ['culture', 'city'] if none are mentioned."
     )
     activities: list[str] = Field(
-        description="Desired activities, chosen from: museums, architecture, food, shopping, music, "
+        # "food" deliberately excluded here (confirmed live): the destinations backend's
+        # activities field never contains that literal string (foodie interest is
+        # modeled as the "food" *vibe*, not an activity - see rest-servers/destinations'
+        # actual data), and get_destination_shortlist's activities filter is an exact-match
+        # AND condition. Extracting "food" into activities here silently zeroes out every
+        # candidate regardless of anything else the traveller asked for - a real request
+        # like "somewhere with great food" should land on the vibes field instead.
+        description="Desired activities, chosen from: museums, architecture, shopping, music, "
                      "walking. Default ['museums'] if none are mentioned."
     )
 
