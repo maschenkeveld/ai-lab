@@ -43,21 +43,36 @@ ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "http://agentgateway.share
 
 
 def ensure_dataset(client: Client) -> str:
-    """Create the dataset (idempotent) and return its name, carrying reference_outputs and
-    category metadata so evaluators can actually check expected behavior, not just presence."""
+    """Create the dataset if missing, and otherwise make sure its examples actually match
+    EXAMPLES in dataset.py - not just that *a* dataset with this name exists.
+
+    `has_dataset` alone isn't enough: a dataset created by an older version of this script
+    (schema-mismatched field names, no reference_outputs) silently stuck around under the
+    same name and every later run kept reusing it unchanged, since the old code only ever
+    checked existence. That produced a misleadingly "clean" run: with no reference_outputs on
+    those stale examples, most evaluators here short-circuit to a vacuous "not applicable;
+    skipped" pass rather than actually checking anything - confirmed live, where the real
+    eval run silently fell back to 6 old examples with no reference_outputs for weeks of
+    dataset.py changes. This replaces the dataset's examples outright on every run instead,
+    trading "preserve hand-edits made in the LangSmith UI" for the dataset always reflecting
+    what dataset.py actually says - the right tradeoff for a dev/CI eval set, not a
+    manually-curated one.
+    """
+    target = [
+        {"inputs": ex["inputs"], "outputs": ex["reference_outputs"], "metadata": ex["metadata"]}
+        for ex in EXAMPLES
+    ]
     if not client.has_dataset(dataset_name=DATASET_NAME):
         dataset = client.create_dataset(DATASET_NAME, description=DATASET_DESCRIPTION)
-        client.create_examples(
-            dataset_id=dataset.id,
-            examples=[
-                {
-                    "inputs": ex["inputs"],
-                    "outputs": ex["reference_outputs"],
-                    "metadata": ex["metadata"],
-                }
-                for ex in EXAMPLES
-            ],
-        )
+        client.create_examples(dataset_id=dataset.id, examples=target)
+        return DATASET_NAME
+
+    dataset = client.read_dataset(dataset_name=DATASET_NAME)
+    existing = list(client.list_examples(dataset_id=dataset.id))
+    if len(existing) != len(target) or any(ex.inputs != t["inputs"] for ex, t in zip(existing, target)):
+        if existing:
+            client.delete_examples(example_ids=[ex.id for ex in existing])
+        client.create_examples(dataset_id=dataset.id, examples=target)
     return DATASET_NAME
 
 
