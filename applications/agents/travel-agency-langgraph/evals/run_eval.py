@@ -7,7 +7,7 @@ sequential conversation-state check that evaluate()'s concurrent per-example mod
 express (see check_thread_state).
 
 Usage:
-    export ORCHESTRATOR_URL=http://agentgateway.lab            # or the shared-pve-home host
+    export ORCHESTRATOR_URL=http://agentgateway.lab   # override for the local kind lab
     export LANGCHAIN_API_KEY=...       # LangSmith EU service key
     export LITELLM_BASE_URL=... LITELLM_API_KEY=...   # for the LLM-as-judge evaluator (defaults to in-cluster LiteLLM)
     uv run run_eval.py
@@ -36,9 +36,10 @@ load_dotenv()
 
 os.environ.setdefault("LANGCHAIN_ENDPOINT", "https://eu.api.smith.langchain.com")
 
-# `.lab` is this repo's own convention (AGENTS.md) for the kind lab; a shared-pve-home
-# deployment overrides this via env rather than the other way around.
-ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "http://agentgateway.lab")
+# Defaults to the real shared-pve-home deployment, reachable on the home LAN — this is where
+# evals actually get run in practice. Override to http://agentgateway.lab for the throwaway
+# local kind lab instead.
+ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "http://agentgateway.shared.pve-home.schenkeveld.io")
 
 
 def ensure_dataset(client: Client) -> str:
