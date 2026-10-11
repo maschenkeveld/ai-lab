@@ -124,7 +124,33 @@ Every agent exposes:
 - `/a2a/jsonrpc`
 - `/health`
 
-The orchestrator also has `/plan` and `/plan/stream` REST endpoints for quick testing.
+The orchestrator also has `/plan` and `/plan/stream` REST endpoints for quick testing, plus
+`/pending` and `/approve` for the human-in-the-loop approval gate below.
+
+**Human-in-the-loop booking approval** — the orchestrator's `book_flight` tool pauses via
+LangGraph's `interrupt()` before actually booking (the one irreversible, money-committing
+step in the workflow) and waits for a human decision:
+
+1. A trip request that reaches booking comes back with `status: "awaiting_approval"` and a
+   `pending_approval` object describing the proposed booking, instead of a final answer.
+2. `GET /a2a/travel-orchestrator/pending` lists every run currently paused this way, keyed by
+   `thread_id` — a reviewer doesn't need to already know which thread to look at.
+3. `POST /a2a/travel-orchestrator/approve` with `{"thread_id": "...", "approved": true|false}`
+   resumes that exact run: approving completes the booking, rejecting reports back cleanly
+   that nothing was booked.
+
+`approve_cli.py` (in `orchestrator/`) is a small terminal tool that does this for you — it
+polls `/pending`, shows each proposed booking, and prompts `Approve? [y/n]`:
+
+```bash
+cd applications/agents/travel-agency-langgraph/orchestrator
+ORCHESTRATOR_URL=http://agentgateway.lab uv run python approve_cli.py
+```
+
+**Verbose console logging** — every agent service logs its own activity (requirements
+extracted, each tool call and result, final status) to stdout as it happens, so running a
+service in a terminal shows a live, readable trace of what the agent is doing — not just the
+final JSON response. On by default; set `VERBOSE=false` on a service to silence it.
 
 **LangSmith tracing** — enabled automatically when the `langsmith-secret` k8s Secret is present (`LANGCHAIN_API_KEY`). All five services are instrumented (`@traceable`, with `langsmith.run_helpers.tracing_context` propagating trace headers across each A2A hop), so one trip-planning request produces a single nested trace tree, not five disconnected ones.
 
@@ -367,7 +393,8 @@ All MCP endpoints are open — no auth required.
 # Check agent cards
 curl http://agentgateway.lab/a2a/travel-orchestrator/.well-known/agent-card.json | jq .
 
-# Trigger the full travel workflow
+# Trigger the full travel workflow — this pauses for approval before booking (see below),
+# so the response you get back has status: "awaiting_approval", not a final confirmation.
 curl -X POST http://agentgateway.lab/a2a/travel-orchestrator/a2a/jsonrpc \
   -H "Content-Type: application/json" -H "A2A-Version: 0.3.0" \
   -d '{
@@ -379,12 +406,21 @@ curl -X POST http://agentgateway.lab/a2a/travel-orchestrator/a2a/jsonrpc \
         "kind": "message",
         "messageId": "msg-1",
         "role": "user",
-        "parts": [{"kind": "text", "text": "{\"name\":\"Alice\",\"from\":\"AMS\",\"date\":\"2026-09-01\",\"activity\":\"museums\",\"vibe\":\"culture\",\"budget\":\"high\"}"}]
+        "parts": [{"kind": "text", "text": "{\"passenger_name\":\"Alice\",\"origin\":\"AMS\",\"date\":\"2026-09-01\",\"activities\":[\"museums\"],\"vibes\":[\"culture\"],\"budget_level\":\"high\"}"}],
+        "metadata": {"thread_id": "demo-thread-1"}
       }
     }
   }' | jq .
 
-# Or use the simpler /plan endpoint
+# See the booking waiting for a decision
+curl http://agentgateway.lab/a2a/travel-orchestrator/pending | jq .
+
+# Approve it (use "approved": false to reject and confirm nothing gets booked)
+curl -X POST http://agentgateway.lab/a2a/travel-orchestrator/approve \
+  -H "Content-Type: application/json" \
+  -d '{"thread_id": "demo-thread-1", "approved": true}' | jq .
+
+# Or use the simpler /plan endpoint, then approve_cli.py (see above) to handle the pause
 curl -X POST http://agentgateway.lab/a2a/travel-orchestrator/plan \
   -H "Content-Type: application/json" \
   -d '{"prompt":"Plan a high budget museum trip for Alice from AMS on 2026-09-01"}' | jq .

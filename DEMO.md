@@ -27,6 +27,12 @@ task up
 
 This takes a few minutes on first run (image pulls). Subsequent runs are fast.
 
+**Tip for any live demo:** every agent service logs its own activity to stdout as it
+happens — requirements extracted, each tool call and result, final status — not just the
+final JSON response. Keep `kubectl logs -n travel-agency-langgraph -l app=travel-orchestrator-langgraph -f`
+open in a second terminal while you run the curl commands below and the agent's reasoning
+shows up live. Set `VERBOSE=false` on a deployment to silence this.
+
 ---
 
 ## Sanity checks
@@ -181,7 +187,7 @@ The orchestrator describes its `plan-trip` skill and references its public URL t
 ```bash
 curl -X POST http://agentgateway.lab/a2a/travel-orchestrator/plan \
   -H "Content-Type: application/json" \
-  -d '{"prompt": "Plan a high budget museum trip for Maarten from AMS on 2026-07-15"}' \
+  -d '{"prompt": "Plan a high budget museum trip for Maarten from AMS on 2026-07-15", "thread_id": "demo-1"}' \
   | jq .
 ```
 
@@ -189,18 +195,58 @@ The response includes:
 - `shortlist` — 5 candidate destinations
 - `selected_destination` — the one chosen
 - `flight` — found flight details
-- `booking` — confirmed booking code
-- `answer` — human-readable summary
+- `status` — `"awaiting_approval"`, not a confirmed booking yet (see Step 3)
+- `pending_approval` — the proposed booking, waiting on a human decision
+- `answer` — explains that it's waiting for approval
 
-### Step 3 — Show what happened under the hood
+### Step 3 — Approve (or reject) the booking
 
-The orchestrator made **4 sequential A2A calls** through agentgateway:
+**What to show:** booking a flight is the one irreversible, money-committing step in this
+workflow, so `book_flight` pauses and waits for a human decision instead of booking
+immediately (LangGraph's `interrupt()` — see `book_flight` in `graph.py` for how).
+
+```bash
+# See what's waiting for a decision
+curl http://agentgateway.lab/a2a/travel-orchestrator/pending | jq .
+
+# Approve it — completes the booking
+curl -X POST http://agentgateway.lab/a2a/travel-orchestrator/approve \
+  -H "Content-Type: application/json" \
+  -d '{"thread_id": "demo-1", "approved": true}' | jq .
+
+# Or reject it — confirms nothing was booked
+curl -X POST http://agentgateway.lab/a2a/travel-orchestrator/approve \
+  -H "Content-Type: application/json" \
+  -d '{"thread_id": "demo-1", "approved": false}' | jq .
+```
+
+The approved response now includes `booking` (a real confirmation code) and `status: "booked"`.
+The rejected response shows `status: "rejected"` and `booking: null` — and the flight-booker
+specialist is never called at all in that case (confirm this live in Grafana Loki: no
+`travel-flight-booker` log line appears for a rejected thread_id).
+
+For the human-facing side of this rather than raw curl, use the approval CLI:
+
+```bash
+cd applications/agents/travel-agency-langgraph/orchestrator
+ORCHESTRATOR_URL=http://agentgateway.lab uv run python approve_cli.py
+```
+
+It polls `/pending`, shows each proposed booking, and prompts `Approve? [y/n]` — this is the
+better thing to show live in a demo than the raw curl calls above.
+
+### Step 4 — Show what happened under the hood
+
+The orchestrator made **4 sequential A2A calls** through agentgateway, with a human decision
+in between the last two:
 
 ```
 orchestrator → agentgateway/a2a/destination         → got shortlist of 5
 orchestrator → agentgateway/a2a/destination-decision → picked one
 orchestrator → agentgateway/a2a/flight-finder        → found flight
-orchestrator → agentgateway/a2a/flight-booker        → confirmed booking
+                                                       ⏸ paused — awaiting human approval
+                                                       (your decision via /approve, Step 3)
+orchestrator → agentgateway/a2a/flight-booker        → confirmed booking (only if approved)
 ```
 
 Call a specialist directly to make it concrete:
@@ -219,7 +265,7 @@ curl -X POST http://agentgateway.lab/a2a/destination/a2a/jsonrpc \
   }' | jq '.result.parts[0].text | fromjson'
 ```
 
-### Step 4 — Show the retry loop (optional)
+### Step 5 — Show the retry loop (optional)
 
 The orchestrator retries with a different destination if flight-finder returns nothing — but this is **prompt-driven, not graph-driven**. There's no hand-authored `StateGraph`, no `route_after_flight`, no conditional edges: the orchestrator is a single LangChain tool-calling agent (`langchain.agents.create_agent`), and the retry behavior lives entirely in `SYSTEM_PROMPT` in `graph.py`, which instructs the model to call `pick_destination` again with the failed IATA code appended to `tried_iata_codes` whenever `find_flight` returns `{"flight": null}`. Open `applications/agents/travel-agency-langgraph/orchestrator/travel_orchestrator/graph.py` and read `SYSTEM_PROMPT` and the `find_flight` tool to see this.
 
@@ -296,6 +342,7 @@ Each `/plan` call appears as a single nested trace spanning all five services:
 - each specialist's `@traceable` function (`get_destinations`, `pick_destination`, `find_flight`, `book_flight`), nested under the matching tool call via trace-header propagation across the A2A hop
 - inputs, outputs, and latency for every step above
 - the retry loop, if a flight wasn't found on the first pick, visible as repeated `pick_destination` → `find_flight` tool calls with a growing `tried_iata_codes` list — not a different graph path
+- the `book_flight` tool call itself shows a gap in the trace timeline where the run was paused awaiting human approval (Demo 3, Step 3) — the trace resumes once the `/approve` decision comes in
 
 ### Kafka UI — `http://kafka-ui.lab`
 
