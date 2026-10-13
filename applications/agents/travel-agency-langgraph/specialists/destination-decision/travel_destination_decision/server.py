@@ -49,7 +49,7 @@ AGENTGATEWAY_URL      = os.getenv("AGENTGATEWAY_URL", "http://agentgateway.lab")
 AGENT_NAME            = os.getenv("AGENT_NAME", "travel-destination-decision")
 PUBLIC_AGENT_BASE_URL = os.getenv("PUBLIC_AGENT_BASE_URL", "http://agentgateway.lab/a2a/destination-decision")
 
-# Deterministic evaluation mode (IMPROVEMENTS.md §11): the dice roll makes
+# Deterministic evaluation mode: the dice roll makes
 # regression evals noisy, since which destination gets picked (and therefore
 # whether find_flight/book_flight even get exercised for a given candidate)
 # is otherwise random. Default stays stochastic (normal production behavior,

@@ -192,7 +192,7 @@ def check_thread_state() -> dict[str, Any]:
     a different thread_id (should NOT leak it - there's no prior turn on that thread).
 
     Confirmed live against shared-pve-home, and worth stating plainly rather than papering
-    over (IMPROVEMENTS.md §26): "same_thread_recalls_prior_turn" fails even on a genuinely
+    over: "same_thread_recalls_prior_turn" fails even on a genuinely
     continued thread. The Postgres checkpointer does persist the full message history across
     calls on one thread_id, but the orchestrator's SYSTEM_PROMPT only ever says to
     autonomously plan+book "one trip per conversation" and "infer sensible defaults and

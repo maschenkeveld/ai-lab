@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Human-in-the-loop approval CLI for the travel-orchestrator agent.
 
-Polls the orchestrator's /pending endpoint for bookings awaiting a human decision (IMPROVEMENTS.md's
+Polls the orchestrator's /pending endpoint for bookings awaiting a human decision (this is the
 human-in-the-loop requirement: book_flight pauses here until a human approves or rejects it),
 shows each one's details, and prompts for a decision — then calls /approve to resume that run.
 

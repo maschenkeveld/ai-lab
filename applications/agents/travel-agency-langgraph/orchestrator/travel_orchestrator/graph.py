@@ -21,7 +21,7 @@ when LANGCHAIN_TRACING_V2=true and LANGCHAIN_API_KEY are set.
 Conversation state (including which destinations have been tried) is persisted per
 `thread_id` in Postgres via AsyncPostgresSaver, not in pod-local memory — so the
 orchestrator's compute is horizontally scalable (any replica can serve any request) while
-conversation state lives externally in Postgres (IMPROVEMENTS.md §17).
+conversation state lives externally in Postgres.
 
 Unresolved issue, stated plainly rather than hidden: there is no session affinity /
 distributed locking around a given `thread_id`. Two concurrent requests for the same
@@ -276,7 +276,7 @@ def find_flight(origin: str, to_iata: str, date: str) -> str:
         result = call_specialist(SPECIALIST_FLIGHT_FINDER, {"origin": origin, "to_iata": to_iata, "date": date})
     except httpx.HTTPError:
         # Distinguish "the flight-finder backend itself is unreachable" from "it answered and
-        # found no route" (IMPROVEMENTS.md §15) — same {"flight": null} shape so the agent's
+        # found no route" — same {"flight": null} shape so the agent's
         # existing retry logic is unaffected, but the extra "error" key lets tool_calls/traces
         # (and future evaluators) tell the two apart instead of treating every failure alike.
         result = {"flight": None, "error": "backend_unavailable"}
@@ -599,9 +599,8 @@ def _scan_tool_calls(messages: list[Any]) -> dict[str, Any]:
 
 def summarize_result(result: dict[str, Any], requirements: dict[str, Any]) -> dict[str, Any]:
     """Pull the final answer, each tool's last result, and the tool-call sequence out of the
-    agent's message history (IMPROVEMENTS.md §14: a structured result alongside the prose
-    answer, so callers - including the eval harness - don't have to re-derive outcome/sequence
-    from free text)."""
+    agent's message history - a structured result alongside the prose answer, so callers
+    (including the eval harness) don't have to re-derive outcome/sequence from free text."""
     messages = result.get("messages") or []
     answer = messages[-1].content if messages else ""
     scan = _scan_tool_calls(messages)

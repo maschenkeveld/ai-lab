@@ -3,8 +3,8 @@
 These exercise evaluator logic against synthetic `outputs`/`reference_outputs` dicts, not a
 live orchestrator — they're a fast, infra-free regression check for the scoring logic itself
 (CI has no reachable orchestrator deployment to run the real dataset against; see
-IMPROVEMENTS.md §21/§25 and run_eval.py's own module docstring). Running the full dataset
-against a live deployment stays a manual/scheduled step, not a PR check.
+run_eval.py's own module docstring). Running the full dataset against a live deployment stays
+a manual/scheduled step, not a PR check.
 """
 
 import sys

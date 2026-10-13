@@ -11,7 +11,7 @@ A `trip_request` can also just be a plain string (see the "ambiguous" category) 
 orchestrator's extraction step is an LLM call over free text either way; a dict is just a
 convenient, readable way to express a request precisely.
 
-## Categories (IMPROVEMENTS.md §7)
+## Categories
 
 - happy_path: normal requests that should book successfully.
 - missing_values: one or more fields omitted; verifies the stated defaults kick in
@@ -24,9 +24,9 @@ convenient, readable way to express a request precisely.
 
 ## Why there's no genuine "first destination fails, second succeeds" case
 
-IMPROVEMENTS.md §7 asks for a retry scenario (destination A → no flight → destination B →
-flight found). After reading the actual backend code, this isn't realistically
-constructable with the current demo data, for two independent reasons:
+A genuine retry scenario (destination A → no flight → destination B → flight found) was the
+original goal for this category. After reading the actual backend code, this isn't
+realistically constructable with the current demo data, for two independent reasons:
 
 1. `rest-destinations`' and `rest-flights`' airport data are kept in perfect sync (same 33
    IATA codes on both sides) — every destination the shortlist can return already has a
@@ -43,8 +43,8 @@ candidate uniformly (an origin rest-flights doesn't recognize - see NO_FLIGHT_CA
 or via a genuine backend outage - never a single-destination failure. Constructing a real
 "fails once, succeeds on retry" case would mean mocking the flights backend for one
 specific destination, which wouldn't be an honest integration-level eval case. This is a
-real architectural property worth a design discussion, not a dataset gap to paper over
-(see IMPROVEMENTS.md §26) - noted here instead of faking a case that can't actually happen
+real architectural property worth a design discussion, not a dataset gap to paper over -
+noted here instead of faking a case that can't actually happen
 end-to-end. The `retry_behavior_valid`/`no_duplicate_destination_retry` evaluators
 (evaluators.py) still exist and are exercised by DESTINATION_DECISION_DETERMINISTIC mode
 at the unit level; they just can't be driven through a realistic dataset case today.

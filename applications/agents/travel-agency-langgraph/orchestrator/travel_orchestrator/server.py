@@ -89,8 +89,8 @@ async def jsonrpc(request: JsonRpcRequest) -> dict[str, Any]:
             "messageId": str(uuid.uuid4()),
             "role": "agent",
             "parts": [{"kind": "text", "text": result["answer"]}],
-            # Structured outcome alongside the prose answer (IMPROVEMENTS.md §14) - lets
-            # callers (the eval harness in particular) check status/sequence/requirements
+            # Structured outcome alongside the prose answer - lets callers (the eval harness
+            # in particular) check status/sequence/requirements
             # without re-parsing free text.
             "metadata": {
                 "thread_id": thread_id,
@@ -146,7 +146,7 @@ class ApprovalRequest(BaseModel):
 @app.get("/a2a/travel-orchestrator/pending")
 def pending_approvals() -> dict[str, Any]:
     """Runs currently paused awaiting a human booking decision — lets a reviewer (CLI tool,
-    UI) discover what's waiting without already knowing a thread_id (IMPROVEMENTS.md's
+    UI) discover what's waiting without already knowing a thread_id (this is the
     human-in-the-loop requirement: book_flight pauses here until approved or rejected).
 
     This reads an in-memory dict (graph.py's _pending_approvals), not the checkpointer

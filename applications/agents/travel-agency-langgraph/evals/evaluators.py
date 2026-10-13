@@ -1,4 +1,4 @@
-"""Deterministic + semantic evaluators for the travel-orchestrator eval dataset (IMPROVEMENTS.md §9-10).
+"""Deterministic + semantic evaluators for the travel-orchestrator eval dataset.
 
 All evaluators read the structured `outputs` dict `run_eval.py`'s `target()` builds from the
 orchestrator's A2A response metadata (status/shortlist/selected_destination/flight/booking/
@@ -97,9 +97,8 @@ def date_correct(outputs: dict[str, Any], reference_outputs: dict[str, Any]) -> 
 
 def requirements_correct(outputs: dict[str, Any], reference_outputs: dict[str, Any]) -> dict[str, Any]:
     """Structured requirement extraction matches reference expectations, where given.
-    Only checks fields actually present in reference_outputs (IMPROVEMENTS.md §9's
-    requirements_correct) — e.g. a missing_values case can assert just origin without also
-    asserting budget_level."""
+    Only checks fields actually present in reference_outputs — e.g. a missing_values case
+    can assert just origin without also asserting budget_level."""
     checkable = {"origin", "budget_level"}  # vibes/activities are free-form LLM picks, not asserted exactly
     reqs = outputs.get("requirements") or {}
     mismatches = {
@@ -187,7 +186,7 @@ def retry_behavior_valid(outputs: dict[str, Any], reference_outputs: dict[str, A
 
 
 # ---------------------------------------------------------------------------
-# Semantic (LLM-as-judge) — IMPROVEMENTS.md §10
+# Semantic (LLM-as-judge)
 # ---------------------------------------------------------------------------
 
 LITELLM_BASE_URL = __import__("os").environ.get("LITELLM_BASE_URL", "http://litellm.lab/v1")
