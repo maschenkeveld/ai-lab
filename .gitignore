@@ -27,5 +27,5 @@ __pycache__/
 *.pyc
 *.egg-info/
 
-# Local-only presentation deck — not meant to be pushed
-docs/presentation-deck.md
+# docs/ is local-only working material — not meant to be pushed
+docs/*
