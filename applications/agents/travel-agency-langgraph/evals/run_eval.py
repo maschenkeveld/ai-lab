@@ -216,13 +216,32 @@ def check_thread_state() -> dict[str, Any]:
     different, unrelated booking code). Comparing the booking code instead fixes this -
     collision odds across independent 6-character alphanumeric codes are negligible, so a
     match is a real signal of leaked state rather than coincidence.
+
+    Each run uses a fresh thread_id (THREAD_STATE_SAME_ID/OTHER_ID plus a random suffix)
+    rather than a fixed one. An earlier version reused the same fixed thread_id across runs,
+    and a stray out-of-band call into that thread while it was paused on book_flight's
+    interrupt() permanently corrupted its checkpoint (an assistant message with a tool_calls
+    entry that never got a matching tool response - OpenAI's API rejects this on every
+    subsequent call). A fixed thread_id has no way to recover from that; a fresh one per run
+    does, at the cost of not literally reusing "the same" thread across separate recordings.
+
+    book_flight now pauses for human approval (the HITL gate) before turn1's booking
+    completes, same as target() handles for the main dataset - this turn1 is auto-approved on
+    its own behalf (this check is about thread continuity, not the approval gate itself, which
+    check_human_approval exercises directly) before turn2 is sent, since sending a second
+    message into a still-paused thread is exactly the corruption scenario described above.
     """
-    turn1 = _call_orchestrator(THREAD_STATE_BOOKING_REQUEST, THREAD_STATE_SAME_ID)
+    same_id = f"{THREAD_STATE_SAME_ID}-{uuid.uuid4().hex[:8]}"
+    other_id = f"{THREAD_STATE_OTHER_ID}-{uuid.uuid4().hex[:8]}"
+
+    turn1 = _call_orchestrator(THREAD_STATE_BOOKING_REQUEST, same_id)
+    if turn1.get("status") == "awaiting_approval":
+        turn1 = _approve(same_id, approved=True)
     destination_name = (turn1.get("selected_destination") or {}).get("name")
     booking_code = (turn1.get("booking") or {}).get("booking_code")
 
-    turn2 = _call_orchestrator(THREAD_STATE_FOLLOWUP, THREAD_STATE_SAME_ID)
-    turn3 = _call_orchestrator(THREAD_STATE_FOLLOWUP, THREAD_STATE_OTHER_ID)
+    turn2 = _call_orchestrator(THREAD_STATE_FOLLOWUP, same_id)
+    turn3 = _call_orchestrator(THREAD_STATE_FOLLOWUP, other_id)
 
     recalls = bool(booking_code) and booking_code in (turn2.get("answer") or "")
     leaked = bool(booking_code) and booking_code in (turn3.get("answer") or "")
@@ -259,15 +278,24 @@ def check_human_approval() -> dict[str, Any]:
     booking request must pause with the pending booking's details before anything is booked,
     approving it must complete the booking, and rejecting a separate request must leave it
     unbooked rather than booking anyway. This is the assignment's human-in-the-loop
-    requirement — tested directly, not just implemented."""
-    paused = _call_orchestrator(HITL_APPROVE_REQUEST, "eval-hitl-approve")
+    requirement — tested directly, not just implemented.
+
+    Each run uses a fresh thread_id (see check_thread_state's docstring for why a fixed one
+    is unsafe): if a prior run ever crashed between pausing and approving, a fixed thread_id
+    would leave that thread permanently stuck on an unresolved interrupt, and this run's call
+    into the same thread_id would corrupt it the same way.
+    """
+    approve_id = f"eval-hitl-approve-{uuid.uuid4().hex[:8]}"
+    reject_id = f"eval-hitl-reject-{uuid.uuid4().hex[:8]}"
+
+    paused = _call_orchestrator(HITL_APPROVE_REQUEST, approve_id)
     pauses_for_approval = paused.get("status") == "awaiting_approval" and paused.get("booking") is None and bool(paused.get("pending_approval"))
 
-    approved_result = _approve("eval-hitl-approve", approved=True)
+    approved_result = _approve(approve_id, approved=True)
     approval_completes_booking = approved_result.get("status") == "booked" and approved_result.get("booking") is not None
 
-    paused2 = _call_orchestrator(HITL_REJECT_REQUEST, "eval-hitl-reject")
-    rejected_result = _approve("eval-hitl-reject", approved=False)
+    paused2 = _call_orchestrator(HITL_REJECT_REQUEST, reject_id)
+    rejected_result = _approve(reject_id, approved=False)
     rejection_blocks_booking = (
         paused2.get("status") == "awaiting_approval"
         and rejected_result.get("status") == "rejected"
