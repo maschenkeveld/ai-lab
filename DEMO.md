@@ -1,352 +1,168 @@
-# OSS AI Lab — Demo Guide
+# AI Lab — Demo Guide (live deployment, `shared-pve-home`)
+
+> This describes the system as it actually runs — a real, persistent Kubernetes deployment, not
+> a local Kind cluster. `agentgateway.shared.pve-home.schenkeveld.io` is a LAN-private hostname
+> (no public route), so these commands only work from the same home network this cluster runs
+> on — this document exists to show what the system does and how it's exercised, not as a
+> generic "clone and run anywhere" script. For the fully portable, laptop-local version, see
+> [`DEMO-portable-lab.md`](DEMO-portable-lab.md).
 
 ## Setting the scene
 
-A fully local AI platform running on a Kind cluster, built entirely from open-source components. It demonstrates multi-provider LLM routing, MCP tool exposure, and a multi-agent travel workflow — all on a laptop.
-
-The travel agency runs as **5 separate Python microservices** communicating over A2A JSON-RPC through agentgateway:
+Five independent Python microservices — a LangChain v1 orchestrator plus four specialist
+agents — coordinating over A2A JSON-RPC through agentgateway, with MCP tools fronting the Go
+REST backends:
 
 ```
-Client → agentgateway → orchestrator (LangGraph)
-                          → agentgateway → destination        → Traefik → REST API
+Client → agentgateway → orchestrator (LangChain v1 create_agent)
+                          → agentgateway → destination
                           → agentgateway → destination-decision
-                          → agentgateway → flight-finder      → Traefik → REST API
-                          → agentgateway → flight-booker      → Traefik → REST API
+                          → agentgateway → flight-finder
+                          → agentgateway → flight-booker   ⏸ pauses for human approval here
 ```
 
----
-
-## Before you start
-
-Bring the lab up if it isn't already running:
+**Tip for any live demo:** every agent service logs its own activity to stdout as it happens —
+requirements extracted, each tool call and result, final status. Keep this open in a second
+terminal while running the commands below:
 
 ```bash
-cd k8s
-task up
+kubectl --context shared-pve-home logs -n travel-agency-langgraph \
+  -l 'app in (travel-orchestrator-langgraph,travel-destination,travel-destination-decision,travel-flight-finder,travel-flight-booker)' \
+  -f --prefix --max-log-requests=10
 ```
-
-This takes a few minutes on first run (image pulls). Subsequent runs are fast.
-
-**Tip for any live demo:** every agent service logs its own activity to stdout as it
-happens — requirements extracted, each tool call and result, final status — not just the
-final JSON response. Keep `kubectl logs -n travel-agency-langgraph -l app=travel-orchestrator-langgraph -f`
-open in a second terminal while you run the curl commands below and the agent's reasoning
-shows up live. Set `VERBOSE=false` on a deployment to silence this.
 
 ---
 
 ## Sanity checks
 
-Run these before demoing. Everything should return a response without errors.
-
-**REST backends via Traefik:**
-
 ```bash
-curl http://traefik-api-gw.lab/flights/health
-curl http://traefik-api-gw.lab/destinations/health
-curl http://traefik-api-gw.lab/book-flights/health
-```
+# All 5 agent pods healthy
+kubectl --context shared-pve-home get pods -n travel-agency-langgraph
 
-**LiteLLM — confirm models are loaded:**
-
-```bash
-curl -H "Authorization: Bearer sk-ai-lab-litellm" http://litellm.lab/v1/models
-```
-
-Expected: a list with `openai-gpt`, `gemini-pro`, `ollama-llama`.
-
-**All 5 agent cards reachable through agentgateway:**
-
-```bash
-curl http://agentgateway.lab/a2a/travel-orchestrator/.well-known/agent-card.json
-curl http://agentgateway.lab/a2a/destination/.well-known/agent-card.json
-curl http://agentgateway.lab/a2a/destination-decision/.well-known/agent-card.json
-curl http://agentgateway.lab/a2a/flight-finder/.well-known/agent-card.json
-curl http://agentgateway.lab/a2a/flight-booker/.well-known/agent-card.json
-```
-
-Each should return a JSON agent card with `name`, `description`, and `skills`.
-
-**Kafka accessible from Mac terminal:**
-
-```bash
-kafka-topics --bootstrap-server kafka-direct.lab:9092 --list
-```
-
-**MCP tools reachable:**
-
-```bash
-# Connect an MCP client (e.g. Claude Desktop) to these endpoints:
-http://agentgateway.lab/mcp-dice-roller
-http://agentgateway.lab/mcp-destinations
-http://agentgateway.lab/mcp-flights
-http://agentgateway.lab/mcp-book-flights
+# All 5 agent cards reachable through agentgateway
+for a in travel-orchestrator destination destination-decision flight-finder flight-booker; do
+  curl -s http://agentgateway.shared.pve-home.schenkeveld.io/a2a/$a/.well-known/agent-card.json | jq -r .name
+done
 ```
 
 ---
 
-## Demo 1 — LLM Gateway (LiteLLM)
+## Demo 1 — MCP tools via agentgateway
 
-**What to show:** LiteLLM as an OpenAI-compatible proxy in front of multiple providers. Clients send standard OpenAI requests; LiteLLM routes to the right backend.
-
-**Show the configured models:**
-
-```bash
-curl -H "Authorization: Bearer sk-ai-lab-litellm" http://litellm.lab/v1/models
-```
-
-**Send a chat request to OpenAI:**
+The MCP streamable-http protocol is session-scoped: `initialize` first to get a session ID, then
+pass it on every subsequent call.
 
 ```bash
-curl http://litellm.lab/v1/chat/completions \
-  -H "Authorization: Bearer sk-ai-lab-litellm" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "openai-gpt",
-    "messages": [{"role": "user", "content": "What does an API gateway do? Three words."}]
-  }'
+SESSION=$(curl -s -D - -o /dev/null -X POST http://agentgateway.shared.pve-home.schenkeveld.io/mcp-flights \
+  -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"demo","version":"1.0"}}}' \
+  | grep -i '^mcp-session-id:' | tr -d '\r' | cut -d' ' -f2)
+
+curl -s -X POST http://agentgateway.shared.pve-home.schenkeveld.io/mcp-flights \
+  -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
+  -H "Mcp-Session-Id: $SESSION" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
+  | sed -n 's/^data: //p' | jq -r '.result.tools[].name'
 ```
-
-**Same request to Gemini:**
-
-```bash
-curl http://litellm.lab/v1/chat/completions \
-  -H "Authorization: Bearer sk-ai-lab-litellm" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "gemini-pro",
-    "messages": [{"role": "user", "content": "What does an API gateway do? Three words."}]
-  }'
-```
-
-**Same request to local Ollama:**
-
-```bash
-curl http://litellm.lab/v1/chat/completions \
-  -H "Authorization: Bearer sk-ai-lab-litellm" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "ollama-llama",
-    "messages": [{"role": "user", "content": "What does an API gateway do? Three words."}]
-  }'
-```
-
-Same request body, three different providers. The client doesn't need to know which model or provider is behind each alias.
-
----
-
-## Demo 2 — MCP tools via agentgateway
-
-**What to show:** agentgateway exposes MCP servers as tools that any MCP client can discover and call.
-
-**Connect Claude Desktop (or any MCP client) to:**
-
-```
-http://agentgateway.lab/mcp-flights
-```
-
-The client will discover and list available tools. You can invoke `flight_price` directly from the MCP client without writing any agent code.
-
-**To verify the tool list from the CLI:**
-
-```bash
-curl -X POST http://agentgateway.lab/mcp-flights \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
-```
-
-**All four MCP backends:**
 
 | MCP endpoint | Tools |
-| --- | --- |
-| `agentgateway.lab/mcp-flights` | `list_airports`, `flight_price` |
-| `agentgateway.lab/mcp-destinations` | `list_destinations`, `shortlist_destinations`, `get_destination` |
-| `agentgateway.lab/mcp-book-flights` | `create_booking`, `list_bookings` |
-| `agentgateway.lab/mcp-dice-roller` | `roll-2`, `roll-6`, `roll-20` |
+|---|---|
+| `/mcp-flights` | `list_airports`, `flight_price` |
+| `/mcp-destinations` | `list_destinations`, `shortlist_destinations`, `get_destination` |
+| `/mcp-book-flights` | `create_booking`, `list_bookings` |
+| `/mcp-dice-roller` | `roll-2`, `roll-6`, `roll-20` |
 
-The backends are plain REST services — no MCP code in them. agentgateway handles the protocol conversion.
+The backends are plain REST services — no MCP code in them. agentgateway handles the protocol
+conversion; the Python adapters in `applications/mcp-servers/*-adapter/` wrap each REST API.
 
 ---
 
-## Demo 3 — A2A multi-agent workflow (LangGraph)
+## Demo 2 — A2A multi-agent workflow + human-in-the-loop approval
 
-**What to show:** five independent Python microservices, each with an A2A endpoint, coordinated by a LangGraph orchestrator through agentgateway.
-
-### Step 1 — Discover the agents
-
-Each service publishes a standard A2A agent card:
+### Trigger a booking
 
 ```bash
-curl http://agentgateway.lab/a2a/travel-orchestrator/.well-known/agent-card.json | jq .
-```
-
-The orchestrator describes its `plan-trip` skill and references its public URL through agentgateway — not its internal pod address. agentgateway is the only thing external callers ever see.
-
-### Step 2 — Trigger the workflow
-
-```bash
-curl -X POST http://agentgateway.lab/a2a/travel-orchestrator/plan \
+curl -s -X POST http://agentgateway.shared.pve-home.schenkeveld.io/a2a/travel-orchestrator/a2a/jsonrpc \
   -H "Content-Type: application/json" \
-  -d '{"prompt": "Plan a high budget museum trip for Maarten from AMS on 2026-07-15", "thread_id": "demo-1"}' \
-  | jq .
+  -d '{
+    "jsonrpc": "2.0", "id": "demo-1", "method": "message/send",
+    "params": {
+      "message": {
+        "kind": "message", "messageId": "demo-msg-1", "role": "user",
+        "parts": [{"kind": "text", "text": "{\"passenger_name\": \"Demo\", \"origin\": \"AMS\", \"date\": \"2026-09-01\", \"activities\": [\"museums\"], \"vibes\": [\"culture\"], \"budget_level\": \"high\"}"}],
+        "metadata": {"thread_id": "demo-1"}
+      }
+    }
+  }' | jq .
 ```
 
-The response includes:
-- `shortlist` — 5 candidate destinations
-- `selected_destination` — the one chosen
-- `flight` — found flight details
-- `status` — `"awaiting_approval"`, not a confirmed booking yet (see Step 3)
-- `pending_approval` — the proposed booking, waiting on a human decision
-- `answer` — explains that it's waiting for approval
+The response includes `shortlist`, `selected_destination`, `flight`, and
+`status: "awaiting_approval"` — booking is the one irreversible, money-committing step, so
+`book_flight` pauses via LangGraph's `interrupt()` instead of completing automatically.
 
-### Step 3 — Approve (or reject) the booking
-
-**What to show:** booking a flight is the one irreversible, money-committing step in this
-workflow, so `book_flight` pauses and waits for a human decision instead of booking
-immediately (LangGraph's `interrupt()` — see `book_flight` in `graph.py` for how).
+### Approve (or reject) it
 
 ```bash
-# See what's waiting for a decision
-curl http://agentgateway.lab/a2a/travel-orchestrator/pending | jq .
+# See what's waiting
+curl http://agentgateway.shared.pve-home.schenkeveld.io/a2a/travel-orchestrator/pending | jq .
 
-# Approve it — completes the booking
-curl -X POST http://agentgateway.lab/a2a/travel-orchestrator/approve \
+# Approve — completes the booking
+curl -X POST http://agentgateway.shared.pve-home.schenkeveld.io/a2a/travel-orchestrator/approve \
   -H "Content-Type: application/json" \
   -d '{"thread_id": "demo-1", "approved": true}' | jq .
 
-# Or reject it — confirms nothing was booked
-curl -X POST http://agentgateway.lab/a2a/travel-orchestrator/approve \
+# Or reject — confirms nothing was booked (the booking specialist is never even called)
+curl -X POST http://agentgateway.shared.pve-home.schenkeveld.io/a2a/travel-orchestrator/approve \
   -H "Content-Type: application/json" \
   -d '{"thread_id": "demo-1", "approved": false}' | jq .
 ```
 
-The approved response now includes `booking` (a real confirmation code) and `status: "booked"`.
-The rejected response shows `status: "rejected"` and `booking: null` — and the flight-booker
-specialist is never called at all in that case (confirm this live in Grafana Loki: no
-`travel-flight-booker` log line appears for a rejected thread_id).
-
-For the human-facing side of this rather than raw curl, use the approval CLI:
+Or use the approval CLI instead of raw curl:
 
 ```bash
 cd applications/agents/travel-agency-langgraph/orchestrator
-ORCHESTRATOR_URL=http://agentgateway.lab uv run python approve_cli.py
+ORCHESTRATOR_URL=http://agentgateway.shared.pve-home.schenkeveld.io uv run python approve_cli.py --once
 ```
 
-It polls `/pending`, shows each proposed booking, and prompts `Approve? [y/n]` — this is the
-better thing to show live in a demo than the raw curl calls above.
-
-### Step 4 — Show what happened under the hood
-
-The orchestrator made **4 sequential A2A calls** through agentgateway, with a human decision
-in between the last two:
-
-```
-orchestrator → agentgateway/a2a/destination         → got shortlist of 5
-orchestrator → agentgateway/a2a/destination-decision → picked one
-orchestrator → agentgateway/a2a/flight-finder        → found flight
-                                                       ⏸ paused — awaiting human approval
-                                                       (your decision via /approve, Step 3)
-orchestrator → agentgateway/a2a/flight-booker        → confirmed booking (only if approved)
-```
-
-Call a specialist directly to make it concrete:
-
-```bash
-curl -X POST http://agentgateway.lab/a2a/destination/a2a/jsonrpc \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0", "id": "1", "method": "tasks/send",
-    "params": {
-      "message": {
-        "role": "user",
-        "parts": [{"kind": "text", "text": "{\"vibes\":[\"culture\",\"city\"],\"budget_level\":\"high\",\"activities\":[\"museums\"],\"limit\":5,\"origin\":\"AMS\"}"}]
-      }
-    }
-  }' | jq '.result.parts[0].text | fromjson'
-```
-
-### Step 5 — Show the retry loop (optional)
-
-The orchestrator retries with a different destination if flight-finder returns nothing — but this is **prompt-driven, not graph-driven**. There's no hand-authored `StateGraph`, no `route_after_flight`, no conditional edges: the orchestrator is a single LangChain tool-calling agent (`langchain.agents.create_agent`), and the retry behavior lives entirely in `SYSTEM_PROMPT` in `graph.py`, which instructs the model to call `pick_destination` again with the failed IATA code appended to `tried_iata_codes` whenever `find_flight` returns `{"flight": null}`. Open `applications/agents/travel-agency-langgraph/orchestrator/travel_orchestrator/graph.py` and read `SYSTEM_PROMPT` and the `find_flight` tool to see this.
+It polls `/pending`, shows the proposed booking, and prompts `Approve? [y/n]`.
 
 ---
 
-## Demo 4 — LLM Analytics
+## Demo 3 — Observability
 
-LiteLLM emits usage events to Kafka. The ingestor picks them up, generates embeddings, and stores them in Postgres. The analyzer clusters similar prompts and generates plugin recommendations. The React UI shows the results.
+**LangSmith** (EU region — `eu.smith.langchain.com`): project `ai-lab-oss` under Tracing shows
+one nested trace per request, spanning all 5 services via trace-header propagation across each
+A2A hop. Known limitation: this doesn't currently span the approval pause itself — approving
+resumes the run but starts a separate trace, not a continuation of the original (see
+`docs/friction-log.md` for the full writeup — not in this repo, generated locally).
 
-**Open the UI:**
+**Datasets & Experiments** (same LangSmith workspace): dataset `travel-orchestrator-trip-requests`
+holds the offline evaluation results — see [Demo 4](#demo-4--evaluation-suite) below for how
+those get produced.
 
-```
-http://analytics.lab
-```
-
-**Send a batch of similar prompts to build up cluster data:**
-
-```bash
-for q in \
-  "What is 2+2?" \
-  "What color is the sky?" \
-  "What is the capital of France?" \
-  "What year was Python created?" \
-  "Is water wet?"; do
-  curl -s http://litellm.lab/v1/chat/completions \
-    -H "Authorization: Bearer sk-ai-lab-litellm" \
-    -H "Content-Type: application/json" \
-    -d "{\"model\":\"openai-gpt\",\"messages\":[{\"role\":\"user\",\"content\":\"$q\"}]}" > /dev/null
-done
-```
-
-**Force the analyzer to run immediately:**
-
-```bash
-kubectl create job --from=cronjob/llm-analyzer manual-run-$(date +%s) -n llm-analytics
-```
-
-Then reload `http://analytics.lab` to see clusters and recommendations.
+**SigNoz** (self-hosted, `signoz.shared.pve-home.schenkeveld.io`): generic HTTP-level OTEL
+traces/logs/metrics for the 5 agents and the 3 Python MCP adapters. The Go REST backends and the
+dice-roller MCP server don't currently produce spans there despite correct config — a known,
+unresolved gap, purely cosmetic.
 
 ---
 
-## Observability
+## Demo 4 — Evaluation suite
 
-### Grafana — `http://grafana.lab:3000`
-
-Default credentials: `admin / admin`
-
-| Source | What you see |
-| --- | --- |
-| **Explore → Loki** | Logs from all pods |
-| **Explore → Tempo** | Distributed traces |
-| **Explore → Prometheus** | Traefik request metrics, LiteLLM metrics |
-
-**Useful Loki queries:**
-
-```logql
-# All travel agent logs
-{namespace="travel-agency-langgraph"}
-
-# Just the orchestrator
-{namespace="travel-agency-langgraph", app="travel-orchestrator-langgraph"}
-
-# Errors across the lab
-{namespace=~"travel-agency-langgraph|litellm|agentgateway-system"} |= "error"
+```bash
+cd applications/agents/travel-agency-langgraph/evals
+uv sync   # first time only
+export LANGCHAIN_API_KEY=<LangSmith EU key>
+export LITELLM_BASE_URL=http://localhost:14000/v1   # needs the port-forward below
+export LITELLM_API_KEY=<litellm master key, from the litellm-api-key secret in ns litellm>
+kubectl --context shared-pve-home -n litellm port-forward svc/litellm 14000:4000 &
+uv run run_eval.py
 ```
 
-### LangSmith (if API key is configured)
-
-Go to [smith.langchain.com](https://smith.langchain.com) → project `ai-lab-oss`.
-
-Each `/plan` call appears as a single nested trace spanning all five services:
-- `extract_trip_requirements` — the LCEL chain that turns free text into structured requirements
-- the orchestrator's agent loop: LLM turns plus tool calls (`get_destination_shortlist`, `pick_destination`, `find_flight`, `book_flight`)
-- each specialist's `@traceable` function (`get_destinations`, `pick_destination`, `find_flight`, `book_flight`), nested under the matching tool call via trace-header propagation across the A2A hop
-- inputs, outputs, and latency for every step above
-- the retry loop, if a flight wasn't found on the first pick, visible as repeated `pick_destination` → `find_flight` tool calls with a growing `tried_iata_codes` list — not a different graph path
-- the `book_flight` tool call itself shows a gap in the trace timeline where the run was paused awaiting human approval (Demo 3, Step 3) — the trace resumes once the `/approve` decision comes in
-
-### Kafka UI — `http://kafka-ui.lab`
-
-Shows topic list, message counts, and live messages on `llm-usage`.
+Runs 13 test cases (`dataset.py`) against the live orchestrator, scores each with 9 deterministic
+evaluators plus an LLM-as-judge (`evaluators.py`), and reports a scored grid to LangSmith. This
+is a test suite, not an optimization tool — it tells you where the agent needs improving; the
+improvement itself happens afterward, in the prompt or code.
 
 ---
 
@@ -354,20 +170,14 @@ Shows topic list, message counts, and live messages on `llm-usage`.
 
 ```bash
 # Watch all travel agent pods
-kubectl get pods -n travel-agency-langgraph -w
+kubectl --context shared-pve-home get pods -n travel-agency-langgraph -w
 
 # Logs from a specific specialist
-kubectl logs -n travel-agency-langgraph -l app=travel-flight-finder -f
+kubectl --context shared-pve-home logs -n travel-agency-langgraph -l app=travel-flight-finder -f
 
-# Restart the orchestrator after a code change
-kubectl rollout restart deployment/travel-orchestrator-langgraph -n travel-agency-langgraph
+# Restart the orchestrator (e.g. to pick up a new image after a GitHub Actions build)
+kubectl --context shared-pve-home rollout restart deployment/travel-orchestrator-langgraph -n travel-agency-langgraph
 
-# Rebuild and redeploy just the LangGraph services
-cd k8s && task oss:langgraph-apply
-
-# Check agentgateway routes
-kubectl get httproute -A
-
-# Check all pods are healthy
-kubectl get pods -A | grep -v Running | grep -v Completed
+# Check every pod across the system is healthy
+kubectl --context shared-pve-home get pods -A | grep -v Running | grep -v Completed
 ```
