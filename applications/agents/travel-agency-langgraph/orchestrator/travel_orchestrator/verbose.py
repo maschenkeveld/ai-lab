@@ -12,6 +12,7 @@ import os
 from typing import Any
 
 from langchain_core.callbacks import AsyncCallbackHandler
+from langgraph.errors import GraphInterrupt
 
 VERBOSE = os.getenv("VERBOSE", "true").lower() in ("1", "true", "yes")
 
@@ -35,6 +36,14 @@ class ConsoleTraceCallback(AsyncCallbackHandler):
         logger.info("  <- %s", truncate(text))
 
     async def on_tool_error(self, error, *, run_id, parent_run_id=None, tags=None, **kwargs):
+        # book_flight's interrupt() (see graph.py) pauses the run by raising GraphInterrupt
+        # internally - LangGraph's own control-flow signal for "stop here, wait for a
+        # decision," not a real failure. Without this check it would print as "tool error",
+        # which reads as something having gone wrong in a demo when the pause is in fact the
+        # entire point of the human-approval gate.
+        if isinstance(error, GraphInterrupt):
+            logger.info("  paused: awaiting human approval")
+            return
         logger.info("  !! tool error: %s", error)
 
 
