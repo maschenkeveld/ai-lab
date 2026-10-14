@@ -27,5 +27,4 @@ __pycache__/
 *.pyc
 *.egg-info/
 
-# docs/ is local-only working material — not meant to be pushed
-docs/*
+.DS_Store
