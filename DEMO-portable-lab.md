@@ -1,5 +1,7 @@
 # OSS AI Lab — Demo Guide (portable local Kind lab)
 
+## NEEDS UPDATING
+
 > This describes the original, throwaway local-Kind version of this lab. For the demo script
 > against the real, currently-running deployment (`shared-pve-home`, via FluxCD GitOps), see
 > [`DEMO.md`](DEMO.md).

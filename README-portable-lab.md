@@ -4,6 +4,8 @@
 
 # AI Lab — Portable Lab (local Kind cluster)
 
+## NEEDS UPDATING
+
 > **This is the original, portable, laptop-local version of this lab** — a throwaway Kind
 > cluster you can stand up and tear down on your own machine, with no external dependencies.
 > It is **not** how the system currently runs day-to-day: that's a real deployment on a
@@ -23,28 +25,35 @@ A local open-source AI platform lab running on a Kind cluster named `ai-lab-oss`
 
 ## Contents
 
-- [Architecture](#architecture)
-- [What's in the lab](#whats-in-the-lab)
-  - [Traefik — HTTP edge routing](#traefik-http-edge-routing)
-  - [LiteLLM — LLM gateway](#litellm--llm-gateway)
-  - [agentgateway — MCP and A2A](#agentgateway--mcp-and-a2a)
-  - [LangGraph agents](#langgraph-agents)
-  - [MCP servers](#mcp-servers)
-  - [REST APIs](#rest-apis)
-  - [LLM Analytics](#llm-analytics)
-  - [Supporting services](#supporting-services)
-- [How it's put together](#how-its-put-together)
-- [Repository structure](#repository-structure)
-- [Setup](#setup)
-- [Hostnames](#hostnames)
-- [Demos](#demos)
-  - [LLM routing](#llm-routing-demo)
-  - [MCP tools](#mcp-demo)
-  - [A2A agents](#a2a-demo)
-  - [LLM Analytics](#llm-analytics-demo)
-- [Observability](#observability)
-- [Capability comparison with Kong AI Lab](#capability-comparison-with-kong-ai-lab)
-- [Known gaps](#known-gaps)
+- [AI Lab — Portable Lab (local Kind cluster)](#ai-lab--portable-lab-local-kind-cluster)
+  - [NEEDS UPDATING](#needs-updating)
+  - [Contents](#contents)
+  - [Architecture](#architecture)
+  - [What's in the lab](#whats-in-the-lab)
+    - [Traefik — HTTP edge routing](#traefik--http-edge-routing)
+    - [LiteLLM — LLM gateway](#litellm--llm-gateway)
+    - [agentgateway — MCP and A2A](#agentgateway--mcp-and-a2a)
+    - [LangGraph agents](#langgraph-agents)
+    - [MCP servers](#mcp-servers)
+    - [REST APIs](#rest-apis)
+    - [LLM Analytics](#llm-analytics)
+    - [Supporting services](#supporting-services)
+  - [How it's put together](#how-its-put-together)
+  - [Repository structure](#repository-structure)
+  - [Setup](#setup)
+    - [Prerequisites](#prerequisites)
+    - [Step 1 — Start Colima](#step-1--start-colima)
+    - [Step 2 — Create secrets file](#step-2--create-secrets-file)
+    - [Step 3 — Bring up the cluster](#step-3--bring-up-the-cluster)
+  - [Hostnames](#hostnames)
+  - [Demos](#demos)
+    - [LLM routing {#llm-routing-demo}](#llm-routing-llm-routing-demo)
+    - [MCP tools {#mcp-demo}](#mcp-tools-mcp-demo)
+    - [A2A agents {#a2a-demo}](#a2a-agents-a2a-demo)
+    - [LLM Analytics {#llm-analytics-demo}](#llm-analytics-llm-analytics-demo)
+  - [Observability](#observability)
+  - [Capability comparison with Kong AI Lab](#capability-comparison-with-kong-ai-lab)
+  - [Known gaps](#known-gaps)
 
 ---
 
