@@ -1,0 +1,27 @@
+version: '3'
+
+# Run from this folder: `cd agentic-examples/mcp_tools && task run`. The repo's .env is passed to uv.
+
+tasks:
+  run:
+    desc: Ask a question; the agent uses the bundled MCP server over stdio (-- --url <mcp url> for another server)
+    cmds:
+      - uv run --env-file ../../.env python main.py {{.CLI_ARGS}}
+
+  run:local:
+    desc: Same, against vLLM on this Mac (start it with `cd ../../k8s && task inference:run`)
+    cmds:
+      - |
+        set -a; . ../../.env; set +a
+        LLM_BASE_URL=http://127.0.0.1:${VLLM_PORT:-8000}/v1 LLM_API_KEY=$VLLM_API_KEY LLM_MODEL=$VLLM_MODEL \
+          uv run python main.py {{.CLI_ARGS}}
+
+  serve:
+    desc: Run the MCP server over HTTP on 127.0.0.1:8000 (for Claude Desktop, or `task run -- --url http://127.0.0.1:8000/mcp`)
+    cmds:
+      - uv run python server.py --http
+
+  test:
+    desc: Offline tests (the real server in-process, a scripted model)
+    cmds:
+      - uv run pytest -q

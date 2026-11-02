@@ -154,7 +154,11 @@ OTEL env vars are configured on all three; the Go OTEL SDK is wired in the appli
 
 ### Standalone examples
 
-`agentic-examples/` holds runnable scripts for trying Pydantic AI one idea at a time, against a local model or LiteLLM, with no cluster needed. `pydantic_model/` shows a typed output agent, datasets as files, evals with an LLM judge, and per-model results. See its README.
+`agentic-examples/` holds small runnable examples of one idea each, for trying Pydantic AI and the agent protocols by hand and then
+changing them. Every folder is self-contained (its own `pyproject.toml`, `uv.lock`, `.venv`, Taskfile, README and tests) and needs
+no cluster: `tool_facts` (tools own the facts, a validator stops a model changing them), `mcp_tools` (an agent using MCP tools),
+`human_approval` (pause before an irreversible tool), `a2a_pair` (two agents over A2A), `durable_approval` (a workflow that survives
+a kill while it waits for a person) and `pydantic_model` (typed output and evals). Start with `agentic-examples/README.md`.
 
 ### Local inference
 
@@ -258,7 +262,7 @@ All cluster operations are driven by `task` from the `k8s/` directory.
 │   │   └── bookings-adapter/             # hold / confirm / cancel
 │   └── rest-servers/                     # Go REST APIs (flights, destinations, book-flights)
 │
-├── agentic-examples/                     # standalone Pydantic AI examples (no cluster)
+├── agentic-examples/                     # standalone examples, one self-contained uv project each (no cluster)
 ├── inference/                            # vLLM-Metal scripts (run, check, host discovery)
 ├── llm/                                  # chat templates for local models
 │

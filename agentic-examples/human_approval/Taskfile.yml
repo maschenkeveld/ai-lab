@@ -1,0 +1,24 @@
+version: '3'
+
+# Run from this folder: `cd agentic-examples/human_approval && task run`. The repo's .env is passed to uv.
+
+tasks:
+  run:
+    desc: Ask for a booking; you are asked before anything is booked (-- --approve, or -- --deny "reason")
+    interactive: true
+    cmds:
+      - uv run --env-file ../../.env python main.py {{.CLI_ARGS}}
+
+  run:local:
+    desc: Same, against vLLM on this Mac (start it with `cd ../../k8s && task inference:run`)
+    interactive: true
+    cmds:
+      - |
+        set -a; . ../../.env; set +a
+        LLM_BASE_URL=http://127.0.0.1:${VLLM_PORT:-8000}/v1 LLM_API_KEY=$VLLM_API_KEY LLM_MODEL=$VLLM_MODEL \
+          uv run python main.py {{.CLI_ARGS}}
+
+  test:
+    desc: "Offline tests (a scripted model): a denied booking never runs"
+    cmds:
+      - uv run pytest -q

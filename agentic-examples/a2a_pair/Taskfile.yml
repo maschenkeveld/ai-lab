@@ -1,0 +1,29 @@
+version: '3'
+
+# Run from this folder: `cd agentic-examples/a2a_pair && task demo`. The repo's .env is passed to uv.
+
+tasks:
+  serve:
+    desc: Terminal 1 - run the scout agent over A2A on http://127.0.0.1:4500 (blocking)
+    cmds:
+      - uv run --env-file ../../.env python scout.py
+
+  run:
+    desc: Terminal 2 - the planner asks the scout over A2A (needs `task serve` running)
+    cmds:
+      - uv run --env-file ../../.env python main.py {{.CLI_ARGS}}
+
+  demo:
+    desc: Start the scout, run the planner once, stop the scout
+    cmds:
+      - |
+        uv run --env-file ../../.env python scout.py > /tmp/a2a_scout.log 2>&1 &
+        SCOUT=$!
+        trap "kill $SCOUT 2>/dev/null" EXIT
+        for i in $(seq 1 30); do curl -sf http://127.0.0.1:4500/.well-known/agent-card.json >/dev/null && break; sleep 1; done
+        uv run --env-file ../../.env python main.py {{.CLI_ARGS}}
+
+  test:
+    desc: Offline tests (the real scout in-process, a stub model)
+    cmds:
+      - uv run pytest -q

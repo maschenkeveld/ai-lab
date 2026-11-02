@@ -79,7 +79,7 @@ applications/
     flights/                        Go REST API (opt-in moving fares)
     book-flights/                   Go REST API (SQLite-backed; holds, idempotency)
 
-agentic-examples/                   standalone Pydantic AI examples, no cluster needed
+agentic-examples/                   standalone examples, one self-contained uv project each (no cluster)
 inference/                          vLLM-Metal scripts (run, check, host discovery)
 llm/                                chat templates for local models
 
@@ -217,7 +217,17 @@ vLLM-Metal serves a model on the Mac GPU: `task inference:install`, `task infere
 
 ### Standalone examples (`agentic-examples/`)
 
-Runnable scripts for trying Pydantic AI one idea at a time, with no cluster. `pydantic_model/` is the reference layout (its own uv project and Taskfile, datasets as files, evals, per-model results). Traces go to LGTM when `OTEL_EXPORTER_OTLP_ENDPOINT=http://grafana.lab:4318` is set.
+Small runnable examples of one idea each, with no cluster needed. **Every folder is self-contained**: its own `pyproject.toml`,
+`uv.lock`, `.venv`, `Taskfile.yml`, README and tests, and nothing imported from elsewhere (each has its own copy of `common.py`: the
+model and tracing). Keep it that way: an example you can copy out and break is the point.
+- `pydantic_model`: typed output, datasets as files, evals with an LLM judge (the reference layout)
+- `tool_facts`: tools produce the facts, an output validator overwrites whatever a model returns (share state through `deps`, not a `ContextVar`: tools run in their own task)
+- `mcp_tools`: `MCPToolset` over stdio (bundled server) or HTTP (the lab's); tools discovered, never named in the agent
+- `human_approval`: `requires_approval=True`, `DeferredToolRequests`, `ToolDenied`
+- `a2a_pair`: a FastA2A server and an agent whose tool is an A2A call (send, poll, read)
+- `durable_approval`: a DBOS workflow on SQLite with a durable `recv`; `kill -9` and resume. DBOS runs steps in threads, so patch module-level functions in tests rather than using `agent.override`
+
+Default model is `openai-gpt` via LiteLLM; `task run:local` uses vLLM on the Mac; `LLM_BASE_URL`/`LLM_API_KEY`/`LLM_MODEL` select anything OpenAI-compatible. Traces go to LGTM when `OTEL_EXPORTER_OTLP_ENDPOINT=http://grafana.lab:4318` is set. Run an example's tests with `cd agentic-examples/<folder> && task test`.
 
 ---
 

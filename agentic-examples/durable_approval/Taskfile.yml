@@ -1,0 +1,35 @@
+version: '3'
+
+# Run from this folder: `cd agentic-examples/durable_approval && task run`. The repo's .env is passed to uv.
+# State lives in ./durable.sqlite and ./holds.jsonl (both git-ignored); delete them to start clean.
+
+tasks:
+  run:
+    desc: Plan a trip, hold a flight, wait for approval. Try Ctrl-C while it waits, then `task resume`
+    cmds:
+      - uv run --env-file ../../.env python main.py run {{.CLI_ARGS}}
+
+  resume:
+    desc: Restart after a kill and finish what was waiting (the finished steps are not run again)
+    cmds:
+      - uv run --env-file ../../.env python main.py resume
+
+  approve:
+    desc: 'Approve a waiting trip: task approve -- <workflow id>   (deny: -- <id> --deny "reason")'
+    cmds:
+      - uv run --env-file ../../.env python main.py approve {{.CLI_ARGS}}
+
+  status:
+    desc: 'Show a workflow''s steps and the booking record: task status -- <workflow id>'
+    cmds:
+      - uv run --env-file ../../.env python main.py status {{.CLI_ARGS}}
+
+  clean:
+    desc: Delete the local database and booking record
+    cmds:
+      - rm -f durable.sqlite durable.sqlite-shm durable.sqlite-wal holds.jsonl
+
+  test:
+    desc: Offline tests (DBOS on a temp SQLite file, a stub model)
+    cmds:
+      - uv run pytest -q
