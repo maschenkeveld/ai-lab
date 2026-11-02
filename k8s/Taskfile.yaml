@@ -1,0 +1,476 @@
+version: "3"
+
+dotenv: ["../.env"]
+
+vars:
+  KIND_CLUSTER: ai-lab-oss
+  APP_ROOT: "{{.TASKFILE_DIR}}/../applications"
+  NS_KAFKA: kafka
+  NS_REDIS: redis
+  NS_OTEL: otel-lgtm
+  NS_MCP_DICE: mcp-dice-roller
+  NS_METALLB: metallb-system
+  NS_KEYCLOAK: keycloak
+  NS_LLM_ANALYTICS: llm-analytics
+  NS_TRAEFIK: traefik
+  NS_LITELLM: litellm
+  NS_AGENTGATEWAY: agentgateway-system
+  AGENTS_ROOT: "{{.TASKFILE_DIR}}/../applications/agents/travel-agency"
+
+tasks:
+  # ─── Top-level ────────────────────────────────────────────────────────────
+
+  up:
+    desc: "Full OSS setup: doctor → cluster → namespaces → build images → secrets → helm → DNS → manifests → routing → hosts"
+    cmds:
+      - task: doctor
+      - task: cluster:setup
+      - task: namespaces:apply
+      - task: build
+      - task: secrets
+      - task: helm:install
+      # *.lab must resolve in-cluster before the agents start: they call agentgateway.lab at startup.
+      - task: dns:apply
+      - task: manifests:apply
+      - task: oss:manifests-apply
+      - task: colima:route
+      - task: hostnames:up
+      - |
+        echo ""
+        echo "✓ OSS lab is up — LoadBalancer IPs:"
+        echo ""
+        kubectl get svc -A --field-selector spec.type=LoadBalancer \
+          -o custom-columns='NAMESPACE:.metadata.namespace,NAME:.metadata.name,EXTERNAL-IP:.status.loadBalancer.ingress[0].ip,PORTS:.spec.ports[*].port'
+        echo ""
+        echo "Hostnames: traefik-api-gw.lab, litellm.lab, agentgateway.lab, kafka-direct.lab"
+        if [ "${KEYCLOAK_MODE:-local}" = "local" ]; then
+          echo "  · Keycloak (local):        keycloak.lab:8080"
+        else
+          echo "  · Keycloak (external):     ${KEYCLOAK_EXTERNAL_URL:-<KEYCLOAK_EXTERNAL_URL not set>}"
+        fi
+        if [ "${OBSERVABILITY_MODE:-local}" = "local" ]; then
+          echo "  · Observability (local):   grafana.lab:3000"
+        else
+          echo "  · Observability (external): ${OTEL_EXTERNAL_ENDPOINT:-<OTEL_EXTERNAL_ENDPOINT not set>}"
+        fi
+
+  doctor:
+    desc: "Preflight: check required tools, the Colima/Docker daemon, and .env keys"
+    silent: true
+    cmds:
+      - |
+        fail=0
+        for tool in colima docker kind kubectl helm task uv python3 curl; do
+          if command -v "$tool" >/dev/null 2>&1; then
+            echo "  ✓ $tool"
+          else
+            echo "  ✗ $tool — not found in PATH (brew install $tool)"; fail=1
+          fi
+        done
+        if docker info >/dev/null 2>&1; then
+          echo "  ✓ docker daemon reachable"
+        else
+          echo "  ✗ docker daemon not reachable — run: colima start --network-address"; fail=1
+        fi
+        if colima status --json 2>/dev/null | python3 -c "import sys,json; assert json.load(sys.stdin).get('ip_address')" 2>/dev/null; then
+          echo "  ✓ colima has a network address (MetalLB routing)"
+        else
+          echo "  ✗ colima has no network address — restart it with: colima start --network-address"; fail=1
+        fi
+        if [ -f "{{.TASKFILE_DIR}}/../.env" ]; then
+          echo "  ✓ .env present"
+          [ -n "${OPENAI_KEY:-}" ] && echo "  ✓ OPENAI_KEY set" || echo "  ! OPENAI_KEY empty — LLM calls will fail (copy .env.example to .env)"
+        else
+          echo "  ! no .env — copy .env.example to .env and add a provider key (infra still comes up without it)"
+        fi
+        [ "$fail" -eq 0 ] && echo "✓ doctor: ready" || { echo "✗ doctor: fix the items above"; exit 1; }
+
+  oss-up:
+    desc: "Alias for OSS-only lab setup"
+    cmds:
+      - task: up
+
+  down:
+    desc: "Tear down the kind cluster"
+    cmds:
+      - kind delete cluster --name {{.KIND_CLUSTER}}
+
+  # ─── Hostnames (*.lab) ────────────────────────────────────────────────────
+
+  hostnames:up:
+    desc: "Patch CoreDNS with *.lab rewrites AND write Mac /etc/hosts entries (sudo)"
+    cmds:
+      - task: dns:apply
+      - task: hosts:apply
+
+  dns:apply:
+    desc: "Patch in-cluster CoreDNS to resolve *.lab → service.namespace.svc.cluster.local"
+    cmds:
+      - "{{.TASKFILE_DIR}}/scripts/apply-coredns-rewrites.sh"
+
+  hosts:apply:
+    desc: "Write *.lab → MetalLB IPs into /etc/hosts on this Mac (sudo)"
+    cmds:
+      - "{{.TASKFILE_DIR}}/scripts/apply-mac-hosts.sh"
+
+  # ─── Cluster ──────────────────────────────────────────────────────────────
+
+  cluster:setup:
+    desc: "Create the kind cluster"
+    cmds:
+      - |
+        if kind get clusters 2>/dev/null | grep -q "^{{.KIND_CLUSTER}}$"; then
+          if kubectl cluster-info --context "kind-{{.KIND_CLUSTER}}" &>/dev/null; then
+            echo "→ Cluster '{{.KIND_CLUSTER}}' already exists and is healthy, skipping"
+          else
+            echo "→ Stale cluster entry detected, deleting and recreating"
+            kind delete cluster --name {{.KIND_CLUSTER}} 2>/dev/null || true
+            kind create cluster --config "{{.TASKFILE_DIR}}/kind-config.yaml"
+          fi
+        else
+          echo "→ Creating kind cluster"
+          kind create cluster --config "{{.TASKFILE_DIR}}/kind-config.yaml"
+        fi
+        echo "✓ Cluster ready"
+
+  namespaces:apply:
+    desc: "Create all namespaces"
+    cmds:
+      - kubectl apply -f {{.TASKFILE_DIR}}/namespace.yaml
+
+  colima:route:
+    desc: "Add macOS route so MetalLB LoadBalancer IPs are reachable via Colima (requires sudo)"
+    cmds:
+      - |
+        SUBNET=$(docker network inspect kind \
+          -f '{{`{{range .IPAM.Config}}{{.Subnet}}{{"\n"}}{{end}}`}}' \
+          | grep -v ':' | head -1)
+        COLIMA_IP=$(colima status --json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['ip_address'])")
+        echo "→ Kind subnet: ${SUBNET}"
+        echo "→ Colima VM IP: ${COLIMA_IP}"
+        colima ssh -- sudo iptables -C DOCKER-USER -d "${SUBNET}" -j ACCEPT 2>/dev/null \
+          || colima ssh -- sudo iptables -I DOCKER-USER -d "${SUBNET}" -j ACCEPT
+        echo "✓ iptables: DOCKER-USER accepts traffic to ${SUBNET}"
+        sudo route -n delete -net "${SUBNET}" 2>/dev/null || true
+        sudo route -n add -net "${SUBNET}" "${COLIMA_IP}"
+        echo "✓ Route added: ${SUBNET} → ${COLIMA_IP}"
+
+  # ─── Images ───────────────────────────────────────────────────────────────
+
+  build:
+    desc: "Build OSS lab custom images and load them into kind"
+    cmds:
+      - task: build:mcp-dice-roller
+      - task: build:mcp-destinations
+      - task: build:mcp-flights
+      - task: build:mcp-book-flights
+      - task: build:rest-destinations
+      - task: build:rest-flights
+      - task: build:rest-book-flights
+      - task: build:agency
+      - task: build:llm-ingestor
+      - task: build:llm-analyzer
+      - task: build:llm-analytics-api
+      - task: build:llm-analytics-ui
+
+  build:mcp-dice-roller:
+    cmds:
+      - docker build -t mcp-dice-roller:latest {{.APP_ROOT}}/mcp-servers/dice-roller
+      - kind load docker-image mcp-dice-roller:latest --name {{.KIND_CLUSTER}}
+
+  build:mcp-destinations:
+    cmds:
+      - docker build -t mcp-destinations:latest {{.APP_ROOT}}/mcp-servers/destinations-adapter
+      - kind load docker-image mcp-destinations:latest --name {{.KIND_CLUSTER}}
+
+  build:mcp-flights:
+    cmds:
+      - docker build -t mcp-flights:latest {{.APP_ROOT}}/mcp-servers/flights-adapter
+      - kind load docker-image mcp-flights:latest --name {{.KIND_CLUSTER}}
+
+  build:mcp-book-flights:
+    cmds:
+      - docker build -t mcp-book-flights:latest {{.APP_ROOT}}/mcp-servers/book-flights-adapter
+      - kind load docker-image mcp-book-flights:latest --name {{.KIND_CLUSTER}}
+
+  build:rest-destinations:
+    cmds:
+      - docker build -t rest-destinations:latest {{.APP_ROOT}}/rest-servers/destinations
+      - kind load docker-image rest-destinations:latest --name {{.KIND_CLUSTER}}
+
+  build:rest-flights:
+    cmds:
+      - docker build -t rest-flights:latest {{.APP_ROOT}}/rest-servers/flights
+      - kind load docker-image rest-flights:latest --name {{.KIND_CLUSTER}}
+
+  build:rest-book-flights:
+    cmds:
+      - docker build -t rest-book-flights:latest {{.APP_ROOT}}/rest-servers/book-flights
+      - kind load docker-image rest-book-flights:latest --name {{.KIND_CLUSTER}}
+
+  build:agency:
+    desc: "Build every Pydantic AI travel-agency agent and load it into kind"
+    cmds:
+      - task: build:agency-flight-finder
+      - task: build:agency-flight-booker
+      - task: build:agency-destination
+      - task: build:agency-destination-decision
+      - task: build:agency-orchestrator
+
+  build:agency-flight-finder:
+    cmds:
+      - docker build -f {{.AGENTS_ROOT}}/flight-finder/Dockerfile -t travel-agency-flight-finder:latest {{.AGENTS_ROOT}}
+      - kind load docker-image travel-agency-flight-finder:latest --name {{.KIND_CLUSTER}}
+
+  build:agency-flight-booker:
+    cmds:
+      - docker build -f {{.AGENTS_ROOT}}/flight-booker/Dockerfile -t travel-agency-flight-booker:latest {{.AGENTS_ROOT}}
+      - kind load docker-image travel-agency-flight-booker:latest --name {{.KIND_CLUSTER}}
+
+  build:agency-destination:
+    cmds:
+      - docker build -f {{.AGENTS_ROOT}}/destination/Dockerfile -t travel-agency-destination:latest {{.AGENTS_ROOT}}
+      - kind load docker-image travel-agency-destination:latest --name {{.KIND_CLUSTER}}
+
+  build:agency-destination-decision:
+    cmds:
+      - docker build -f {{.AGENTS_ROOT}}/destination-decision/Dockerfile -t travel-agency-destination-decision:latest {{.AGENTS_ROOT}}
+      - kind load docker-image travel-agency-destination-decision:latest --name {{.KIND_CLUSTER}}
+
+  build:agency-orchestrator:
+    cmds:
+      - docker build -f {{.AGENTS_ROOT}}/orchestrator/Dockerfile -t travel-agency-orchestrator:latest {{.AGENTS_ROOT}}
+      - kind load docker-image travel-agency-orchestrator:latest --name {{.KIND_CLUSTER}}
+
+  build:llm-ingestor:
+    cmds:
+      - docker build -t llm-ingestor:latest {{.APP_ROOT}}/llm-analytics/ingestor
+      - kind load docker-image llm-ingestor:latest --name {{.KIND_CLUSTER}}
+
+  build:llm-analyzer:
+    cmds:
+      - docker build -t llm-analyzer:latest {{.APP_ROOT}}/llm-analytics/analyzer
+      - kind load docker-image llm-analyzer:latest --name {{.KIND_CLUSTER}}
+
+  build:llm-analytics-api:
+    cmds:
+      - docker build -t llm-analytics-api:latest {{.APP_ROOT}}/llm-analytics/api
+      - kind load docker-image llm-analytics-api:latest --name {{.KIND_CLUSTER}}
+
+  build:llm-analytics-ui:
+    cmds:
+      - docker build -t llm-analytics-ui:latest {{.APP_ROOT}}/llm-analytics/ui
+      - kind load docker-image llm-analytics-ui:latest --name {{.KIND_CLUSTER}}
+
+  # ─── Secrets ──────────────────────────────────────────────────────────────
+
+  secrets:
+    desc: "Create OSS lab secrets"
+    cmds:
+      - task: secrets:keycloak-realm
+      - task: secrets:litellm
+
+  secrets:keycloak-realm:
+    desc: "Create keycloak-realm Secret from the realm export JSON — only in local Keycloak mode"
+    cmds:
+      - |
+        if [ "${KEYCLOAK_MODE:-local}" != "local" ]; then
+          echo "→ KEYCLOAK_MODE=${KEYCLOAK_MODE}, skipping keycloak-realm secret (using ${KEYCLOAK_EXTERNAL_URL:-<KEYCLOAK_EXTERNAL_URL not set>})"
+          exit 0
+        fi
+        kubectl create secret generic keycloak-realm \
+          --namespace {{.NS_KEYCLOAK}} \
+          --from-file=realm.json={{.APP_ROOT}}/keycloak/realm-export-ai-lab.json \
+          --dry-run=client -o yaml | kubectl apply -f -
+        echo "✓ keycloak-realm Secret applied to {{.NS_KEYCLOAK}}"
+
+  secrets:litellm:
+    desc: "Create LiteLLM secrets from .env for the OSS LLM gateway"
+    cmds:
+      - |
+        kubectl create secret generic litellm-env \
+          --namespace {{.NS_LITELLM}} \
+          --from-literal=LITELLM_MASTER_KEY="${LITELLM_MASTER_KEY:-sk-ai-lab-litellm}" \
+          --from-literal=OPENAI_API_KEY="${OPENAI_KEY:-}" \
+          --from-literal=GEMINI_API_KEY="${GEMINI_KEY:-}" \
+          --dry-run=client -o yaml | kubectl apply -f -
+        echo "✓ LiteLLM env secret applied to {{.NS_LITELLM}}"
+
+  # ─── Helm ─────────────────────────────────────────────────────────────────
+
+  helm:repos:
+    desc: "Add and update required Helm repos"
+    cmds:
+      - helm repo add metallb https://metallb.github.io/metallb
+      - helm repo add traefik https://traefik.github.io/charts
+      - helm repo update
+
+  helm:install:
+    desc: "Install OSS Helm-based services"
+    cmds:
+      - task: helm:repos
+      - task: helm:install-metallb
+      - task: helm:install-traefik
+      - task: helm:install-keycloak
+      - task: helm:install-agentgateway
+
+  helm:install-metallb:
+    desc: "Install MetalLB and configure an IP pool from the Kind Docker network"
+    cmds:
+      - |
+        helm upgrade --install metallb metallb/metallb \
+          --namespace {{.NS_METALLB}} \
+          -f {{.TASKFILE_DIR}}/helm/metallb-values.yaml \
+          --wait
+      - task: metallb:configure
+
+  helm:install-traefik:
+    desc: "Install Traefik OSS"
+    cmds:
+      - |
+        helm upgrade --install traefik traefik/traefik \
+          --namespace {{.NS_TRAEFIK}} \
+          -f {{.TASKFILE_DIR}}/helm/traefik-values.yaml \
+          --wait
+
+  helm:install-agentgateway:
+    desc: "Install agentgateway control plane"
+    cmds:
+      - task: gateway-api-crds
+      - |
+        helm upgrade -i agentgateway-crds oci://cr.agentgateway.dev/charts/agentgateway-crds \
+          --create-namespace --namespace {{.NS_AGENTGATEWAY}} \
+          --version v1.2.0 \
+          --set controller.image.pullPolicy=Always
+      - |
+        helm upgrade -i agentgateway oci://cr.agentgateway.dev/charts/agentgateway \
+          --namespace {{.NS_AGENTGATEWAY}} \
+          --version v1.2.0 \
+          --set controller.image.pullPolicy=Always \
+          --set controller.extraEnv.KGW_ENABLE_GATEWAY_API_EXPERIMENTAL_FEATURES=true \
+          --wait
+
+  helm:install-keycloak:
+    desc: "Install Keycloak via Helm (CloudPirates chart) — only in local Keycloak mode"
+    cmds:
+      - |
+        if [ "${KEYCLOAK_MODE:-local}" != "local" ]; then
+          echo "→ KEYCLOAK_MODE=${KEYCLOAK_MODE}, skipping local Keycloak install (using ${KEYCLOAK_EXTERNAL_URL:-<KEYCLOAK_EXTERNAL_URL not set>})"
+          exit 0
+        fi
+        helm upgrade --install keycloak oci://registry-1.docker.io/cloudpirates/keycloak \
+          --namespace {{.NS_KEYCLOAK}} \
+          -f {{.TASKFILE_DIR}}/helm/keycloak-values.yaml \
+          --wait --timeout 15m
+
+  helm:uninstall:
+    desc: "Remove Helm releases"
+    cmds:
+      - helm uninstall metallb --namespace {{.NS_METALLB}} || true
+      - helm uninstall traefik --namespace {{.NS_TRAEFIK}} || true
+      - helm uninstall agentgateway --namespace {{.NS_AGENTGATEWAY}} || true
+      - helm uninstall agentgateway-crds --namespace {{.NS_AGENTGATEWAY}} || true
+      - helm uninstall keycloak --namespace {{.NS_KEYCLOAK}} || true
+
+  metallb:configure:
+    desc: "Create MetalLB IPAddressPool from the Kind Docker network subnet"
+    cmds:
+      - |
+        SUBNET=$(docker network inspect kind \
+          -f '{{`{{range .IPAM.Config}}{{.Subnet}}{{"\n"}}{{end}}`}}' \
+          | grep -v ':' | head -1)
+        PREFIX=$(echo "${SUBNET}" | cut -d. -f1-2)
+        RANGE="${PREFIX}.255.200-${PREFIX}.255.250"
+        echo "→ MetalLB address range: ${RANGE}"
+        sed "s|__METALLB_RANGE__|${RANGE}|" {{.TASKFILE_DIR}}/manifests/metallb-config.yaml \
+          | kubectl apply -f -
+        echo "✓ MetalLB configured"
+
+  # ─── Manifests ────────────────────────────────────────────────────────────
+
+  manifests:apply:
+    desc: "Apply base OSS lab manifests"
+    cmds:
+      - |
+        HOST_IP=$(docker network inspect bridge -f '{{`{{range .IPAM.Config}}{{.Gateway}}{{end}}`}}')
+        echo "→ Ollama host IP: ${HOST_IP}"
+
+        if [ "${OBSERVABILITY_MODE:-local}" = "external" ]; then
+          OTEL_ENDPOINT="${OTEL_EXTERNAL_ENDPOINT:?Set OTEL_EXTERNAL_ENDPOINT in .env when OBSERVABILITY_MODE=external}"
+          echo "→ Observability: external (${OTEL_ENDPOINT})"
+        else
+          OTEL_ENDPOINT="http://otel-lgtm.otel-lgtm.svc.cluster.local:4318"
+          echo "→ Observability: local (otel-lgtm)"
+        fi
+
+        for f in {{.TASKFILE_DIR}}/manifests/*.yaml; do
+          BASE=$(basename "$f")
+          if [ "${BASE}" = "metallb-config.yaml" ]; then
+            continue
+          elif [ "${BASE}" = "ollama.yaml" ]; then
+            sed "s/__HOST_IP__/${HOST_IP}/" "$f" | kubectl apply -f -
+          elif [ "${BASE}" = "otel-lgtm.yaml" ]; then
+            if [ "${OBSERVABILITY_MODE:-local}" = "local" ]; then
+              kubectl apply -f "$f"
+            else
+              echo "  · skipping otel-lgtm.yaml (OBSERVABILITY_MODE=external)"
+            fi
+          else
+            sed "s#__OTEL_ENDPOINT__#${OTEL_ENDPOINT}#" "$f" | kubectl apply -f -
+          fi
+        done
+
+  manifests:delete:
+    desc: "Delete base OSS lab manifests"
+    cmds:
+      - kubectl delete -f {{.TASKFILE_DIR}}/manifests/ || true
+
+  gateway-api-crds:
+    desc: "Install Kubernetes Gateway API CRDs"
+    cmds:
+      - kubectl apply --server-side --force-conflicts -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.5.0/experimental-install.yaml
+
+  oss:gateway-api-crds:
+    desc: "Alias for gateway-api-crds"
+    cmds:
+      - task: gateway-api-crds
+
+  oss:manifests-apply:
+    desc: "Apply OSS gateway, LLM, direct Kafka, and travel-agency manifests"
+    cmds:
+      - kubectl apply -f {{.TASKFILE_DIR}}/oss/traefik/
+      - kubectl apply -f {{.TASKFILE_DIR}}/oss/agentgateway/
+      - kubectl apply -f {{.TASKFILE_DIR}}/oss/kafka/
+      - kubectl apply -f {{.TASKFILE_DIR}}/oss/litellm/
+      - task: oss:agency-apply
+      - kubectl apply -f {{.TASKFILE_DIR}}/oss/routes/
+
+  eval:
+    desc: "Run the orchestrator evals (pydantic-evals) against the live lab; pass -- --no-judge to skip the LLM judge"
+    dir: "{{.AGENTS_ROOT}}/evals"
+    cmds:
+      - uv run python run_eval.py {{.CLI_ARGS}}
+
+  oss:agency-apply:
+    desc: "Apply the Pydantic AI travel-agency manifests (namespace first) and restart the agents"
+    cmds:
+      - kubectl apply -f {{.TASKFILE_DIR}}/oss/travel-agency/namespace.yaml
+      - |
+        OTEL_ENDPOINT="http://otel-lgtm.otel-lgtm.svc.cluster.local:4318"
+        if [ "${OBSERVABILITY_MODE:-local}" = "external" ]; then
+          OTEL_ENDPOINT="${OTEL_EXTERNAL_ENDPOINT:?Set OTEL_EXTERNAL_ENDPOINT in .env when OBSERVABILITY_MODE=external}"
+        fi
+        for f in {{.TASKFILE_DIR}}/oss/travel-agency/*.yaml; do
+          sed "s#__OTEL_ENDPOINT__#${OTEL_ENDPOINT}#" "$f" | kubectl apply -f -
+        done
+      - kubectl rollout restart deploy -n travel-agency
+
+  oss:manifests-delete:
+    desc: "Delete OSS gateway, LLM, direct Kafka, and travel-agency manifests"
+    cmds:
+      - kubectl delete -f {{.TASKFILE_DIR}}/oss/routes/ || true
+      - kubectl delete -f {{.TASKFILE_DIR}}/oss/travel-agency/ || true
+      - kubectl delete -f {{.TASKFILE_DIR}}/oss/litellm/ || true
+      - kubectl delete -f {{.TASKFILE_DIR}}/oss/kafka/ || true
+      - kubectl delete -f {{.TASKFILE_DIR}}/oss/agentgateway/ || true
+      - kubectl delete -f {{.TASKFILE_DIR}}/oss/traefik/ || true

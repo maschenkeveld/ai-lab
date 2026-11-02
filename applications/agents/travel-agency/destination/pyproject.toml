@@ -1,0 +1,23 @@
+[project]
+name = "travel-destination"
+version = "0.2.0"
+description = "destination agent — served over A2A"
+requires-python = ">=3.12"
+dependencies = ["travel-common"]
+
+[dependency-groups]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+
+[tool.uv.sources]
+travel-common = { path = "../common", editable = true }
+
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["travel_destination*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

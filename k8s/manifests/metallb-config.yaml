@@ -1,0 +1,19 @@
+# Applied by task metallb:configure — __METALLB_RANGE__ is replaced at runtime
+# with an IP range from the Kind Docker network.
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: kind-pool
+  namespace: metallb-system
+spec:
+  addresses:
+    - __METALLB_RANGE__
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: kind-l2
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - kind-pool

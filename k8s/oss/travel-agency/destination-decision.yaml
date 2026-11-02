@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: destination-decision
+  namespace: travel-agency
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: destination-decision
+  template:
+    metadata:
+      labels:
+        app: destination-decision
+    spec:
+      containers:
+        - name: destination-decision
+          image: travel-agency-destination-decision:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 4202
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 4202
+            periodSeconds: 5
+          env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: __OTEL_ENDPOINT__
+            - name: PORT
+              value: "4202"
+            - name: AGENT_NAME
+              value: travel-destination-decision
+            - name: PUBLIC_AGENT_BASE_URL
+              value: http://agentgateway.lab/a2a/destination-decision
+            - name: AGENTGATEWAY_URL
+              value: http://agentgateway.lab
+            - name: LITELLM_BASE_URL
+              value: http://litellm.litellm.svc.cluster.local:4000/v1
+            - name: LITELLM_MODEL
+              value: openai-gpt
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: destination-decision
+  namespace: travel-agency
+spec:
+  selector:
+    app: destination-decision
+  ports:
+    - name: http
+      port: 4202
+      targetPort: 4202

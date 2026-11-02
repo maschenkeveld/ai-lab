@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: destination
+  namespace: travel-agency
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: destination
+  template:
+    metadata:
+      labels:
+        app: destination
+    spec:
+      containers:
+        - name: destination
+          image: travel-agency-destination:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 4201
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 4201
+            periodSeconds: 5
+          env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: __OTEL_ENDPOINT__
+            - name: PORT
+              value: "4201"
+            - name: AGENT_NAME
+              value: travel-destination
+            - name: PUBLIC_AGENT_BASE_URL
+              value: http://agentgateway.lab/a2a/destination
+            - name: AGENTGATEWAY_URL
+              value: http://agentgateway.lab
+            - name: LITELLM_BASE_URL
+              value: http://litellm.litellm.svc.cluster.local:4000/v1
+            - name: LITELLM_MODEL
+              value: openai-gpt
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: destination
+  namespace: travel-agency
+spec:
+  selector:
+    app: destination
+  ports:
+    - name: http
+      port: 4201
+      targetPort: 4201

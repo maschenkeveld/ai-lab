@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flight-booker
+  namespace: travel-agency
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: flight-booker
+  template:
+    metadata:
+      labels:
+        app: flight-booker
+    spec:
+      containers:
+        - name: flight-booker
+          image: travel-agency-flight-booker:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 4204
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 4204
+            periodSeconds: 5
+          env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: __OTEL_ENDPOINT__
+            - name: PORT
+              value: "4204"
+            - name: AGENT_NAME
+              value: travel-flight-booker
+            - name: PUBLIC_AGENT_BASE_URL
+              value: http://agentgateway.lab/a2a/flight-booker
+            - name: AGENTGATEWAY_URL
+              value: http://agentgateway.lab
+            - name: LITELLM_BASE_URL
+              value: http://litellm.litellm.svc.cluster.local:4000/v1
+            - name: LITELLM_MODEL
+              value: openai-gpt
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flight-booker
+  namespace: travel-agency
+spec:
+  selector:
+    app: flight-booker
+  ports:
+    - name: http
+      port: 4204
+      targetPort: 4204

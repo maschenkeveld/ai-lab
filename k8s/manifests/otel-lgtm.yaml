@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-lgtm
+  namespace: otel-lgtm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otel-lgtm
+  template:
+    metadata:
+      labels:
+        app: otel-lgtm
+    spec:
+      containers:
+        - name: otel-lgtm
+          image: grafana/otel-lgtm:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: OTEL_METRIC_EXPORT_INTERVAL
+              value: "5000"
+            # grafana/otel-lgtm runs Grafana, Loki, Tempo, Prometheus, and
+            # an OTEL collector in one container. The lab can burst a lot of
+            # logs/traces/metrics during agent demos, so keep the pod out of
+            # the 1Gi OOM danger zone.
+            - name: GOMEMLIMIT
+              value: "3200MiB"
+            - name: GOGC
+              value: "75"
+          ports:
+            - containerPort: 3000
+            - containerPort: 4317
+            - containerPort: 4318
+          volumeMounts:
+            - name: otel-lgtm-data
+              mountPath: /data
+          resources:
+            requests:
+              memory: 1Gi
+              cpu: 500m
+            limits:
+              memory: 4Gi
+              cpu: "2"
+      volumes:
+        - name: otel-lgtm-data
+          persistentVolumeClaim:
+            claimName: otel-lgtm-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: otel-lgtm-data
+  namespace: otel-lgtm
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-lgtm
+  namespace: otel-lgtm
+  annotations:
+    metallb.universe.tf/loadBalancerIPs: "172.18.255.208"
+spec:
+  selector:
+    app: otel-lgtm
+  type: LoadBalancer
+  ports:
+    - name: grafana
+      port: 3000
+      targetPort: 3000
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
