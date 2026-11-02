@@ -1,0 +1,20 @@
+version: '3'
+
+# Run from this folder (`cd agentic-examples/pydantic_model && task run`). The repo's .env is
+# passed to uv with --env-file.
+
+tasks:
+  run:
+    desc: Run main.py against the vLLM server (needs `task inference:run` in another terminal)
+    cmds:
+      - uv run --env-file ../../.env python main.py {{.CLI_ARGS}}
+
+  evals:
+    desc: 'Run the evals against local models in-process (stop `task inference:run` first; e.g. -- --datasets basic tricky --repeat 3)'
+    cmds:
+      - uv run --env-file ../../.env python evals.py {{.CLI_ARGS}}
+
+  evals:schema:
+    desc: Regenerate datasets/dataset_schema.json
+    cmds:
+      - uv run --env-file ../../.env python evals.py --write-schema

@@ -1,0 +1,55 @@
+# yaml-language-server: $schema=dataset_schema.json
+# Everyday descriptions. The first 8 cases have one right answer (scored by CityAndCountry);
+# the last 3 have several acceptable answers, so an LLM judge scores them against a rubric.
+name: basic
+evaluators:
+  - CityAndCountry
+cases:
+  - name: windy-city
+    inputs: The windy city in the US of A.
+    expected_output: {city: Chicago, country: United States}
+  - name: city-of-light
+    inputs: The city of light in France.
+    expected_output: {city: Paris, country: France}
+  - name: big-apple
+    inputs: The Big Apple.
+    expected_output: {city: New York, country: United States}
+  - name: eternal-city
+    inputs: The eternal city, capital of Italy.
+    expected_output: {city: Rome, country: Italy}
+  - name: canal-capital
+    inputs: The capital of the Netherlands, known for its canals.
+    expected_output: {city: Amsterdam, country: Netherlands}
+  - name: eiffel
+    inputs: The city where the Eiffel Tower stands.
+    expected_output: {city: Paris, country: France}
+  - name: rising-sun
+    inputs: The capital of the land of the rising sun.
+    expected_output: {city: Tokyo, country: Japan}
+  - name: down-under
+    inputs: The largest city in Australia, home of the Opera House.
+    expected_output: {city: Sydney, country: Australia}
+
+  - name: open-us-east-coast
+    inputs: A very large city on the east coast of the United States.
+    evaluators:
+      - LLMJudge:
+          rubric: >-
+            The city is a very large city on the east coast of the United States (for example
+            New York, Philadelphia or Boston) and the country is the United States.
+          include_input: true
+  - name: open-ancient-ruins
+    inputs: A capital city in southern Europe known for its ancient ruins.
+    evaluators:
+      - LLMJudge:
+          rubric: >-
+            The city is a national capital in southern Europe known for ancient ruins (for example
+            Rome or Athens) and the country matches that city.
+          include_input: true
+  - name: open-brazil
+    inputs: A famous city in Brazil.
+    evaluators:
+      - LLMJudge:
+          rubric: >-
+            The city is a real, well-known city in Brazil and the country is Brazil.
+          include_input: true

@@ -1,30 +1,21 @@
 .idea/
 .DS_Store
 
-# Secrets and generated env
+# Secrets and local env (keep the example)
 .env
+.env.*
+!.env.example
 export-secrets.sh
 
-# Terraform state and providers
-terraform/terraform.tfstate
-terraform/terraform.tfstate.backup
-terraform/.terraform/
-
-# Generated deck merge output
-deck/kong-api.yaml
-deck/kong-llm.yaml
-deck/kong-mcp.yaml
-
-# TLS — root CA cert is committed, private keys are not
-tls/dp-api.crt
-tls/dp-api.key
-tls/dp-llm.crt
-tls/dp-llm.key
-tls/dp-mcp.crt
-tls/dp-mcp.key
+# Python
 .venv/
 __pycache__/
 *.pyc
 *.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
 
-.DS_Store
+# Node (llm-analytics UI)
+node_modules/

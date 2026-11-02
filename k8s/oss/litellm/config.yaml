@@ -18,6 +18,12 @@ data:
         litellm_params:
           model: ollama_chat/llama3.2
           api_base: http://ollama.default.svc.cluster.local:11434
+      - model_name: local-vllm
+        litellm_params:
+          # vLLM-Metal on the Mac host (task inference:run); openai/<served model id>
+          model: os.environ/VLLM_BACKEND_MODEL
+          api_base: os.environ/VLLM_BASE_URL
+          api_key: os.environ/VLLM_API_KEY
       - model_name: embedding-openai
         litellm_params:
           model: openai/text-embedding-3-small
@@ -75,6 +81,15 @@ spec:
                   name: litellm-env
                   key: GEMINI_API_KEY
                   optional: true
+            - name: VLLM_API_KEY
+              valueFrom:
+                secretKeyRef: {name: litellm-env, key: VLLM_API_KEY, optional: true}
+            - name: VLLM_BACKEND_MODEL
+              valueFrom:
+                secretKeyRef: {name: litellm-env, key: VLLM_BACKEND_MODEL, optional: true}
+            - name: VLLM_BASE_URL
+              valueFrom:
+                secretKeyRef: {name: litellm-env, key: VLLM_BASE_URL, optional: true}
           ports:
             - containerPort: 4000
           volumeMounts:

@@ -1,0 +1,26 @@
+{#- Mistral v0.3 template that tolerates system messages (prepended to the first user turn) and renders tools. -#}
+{{- bos_token -}}
+{%- set ns = namespace(system='', first=true) -%}
+{%- for m in messages if m['role'] == 'system' -%}
+{%- set ns.system = ns.system + m['content'] + '\n\n' -%}
+{%- endfor -%}
+{%- for m in messages if m['role'] != 'system' -%}
+{%- if m['role'] == 'user' -%}
+{%- if ns.first and tools -%}{{- '[AVAILABLE_TOOLS] ' + (tools | tojson) + '[/AVAILABLE_TOOLS]' -}}{%- endif -%}
+{{- '[INST] ' + (ns.system if ns.first else '') + m['content'] + '[/INST]' -}}
+{%- set ns.first = false -%}
+{%- elif m['role'] == 'assistant' -%}
+{%- if m.tool_calls -%}
+{{- '[TOOL_CALLS] [' -}}
+{%- for tc in m.tool_calls -%}
+{{- '{"name": "' + tc.function.name + '", "arguments": ' + (tc.function.arguments if tc.function.arguments is string else (tc.function.arguments | tojson)) + ', "id": "' + tc.id + '"}' -}}
+{%- if not loop.last -%}{{- ', ' -}}{%- endif -%}
+{%- endfor -%}
+{{- ']' + eos_token -}}
+{%- else -%}
+{{- ' ' + m['content'] + eos_token -}}
+{%- endif -%}
+{%- elif m['role'] == 'tool' -%}
+{{- '[TOOL_RESULTS] {"content": ' + (m['content'] | tojson) + ', "call_id": "' + m.tool_call_id + '"}[/TOOL_RESULTS]' -}}
+{%- endif -%}
+{%- endfor -%}

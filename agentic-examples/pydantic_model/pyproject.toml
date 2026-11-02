@@ -1,0 +1,14 @@
+[project]
+name = "pydantic-model-example"
+version = "0.1.0"
+description = "Pydantic AI: build a typed Pydantic model from text, on local inference"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "opentelemetry-sdk>=1.34,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1.34,<2",
+    "pydantic-ai-slim[openai]>=2.31.1",
+    "pydantic-evals>=2.61.0",
+]
+
+[tool.uv]
+package = false
