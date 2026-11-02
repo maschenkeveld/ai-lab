@@ -90,7 +90,7 @@ async def show_agent_card() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--model", help="LiteLLM alias (default: LLM_MODEL or openai-gpt)")
+    parser.add_argument("--llm", choices=["openai", "gemini", "ollama", "local"], help="which model, by gateway route (default: openai)")
     parser.add_argument("request", nargs="?", default="Should I go to Vienna, Lisbon or Brussels for a winter weekend?")
     args = parser.parse_args()
 
@@ -99,7 +99,7 @@ def main() -> None:
         asyncio.run(show_agent_card())
     except httpx.HTTPError:
         raise SystemExit(f"No scout at {SCOUT_URL}. Start it first: task serve (in another terminal), or use task demo.")
-    result = planner.run_sync(args.request, model=build_model(args.model))
+    result = planner.run_sync(args.request, model=build_model(args.llm))
     print(f"\nPlanner: {result.output}")
     print("\nThe task each question became, and the states the planner saw while polling:")
     for i, states in enumerate(seen_states, 1):

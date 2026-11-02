@@ -19,7 +19,6 @@ declare -a MAPPINGS=(
   "analytics.lab          172.18.255.206"
   "analytics-api.lab      172.18.255.207"
   "traefik-api-gw.lab     172.18.255.210"
-  "litellm.lab            172.18.255.210"
   "agentgateway.lab       172.18.255.211"
   "kafka-direct.lab       172.18.255.212"
 )

@@ -1,7 +1,7 @@
 """Evals for tool_facts: does a model quote, recommend the cheapest date, and leave the prices alone?
 
     task evals                              # the default model
-    task evals -- --model local-vllm        # compare another LiteLLM alias
+    task evals -- --llm gemini              # compare another model
 
 Two datasets run: `honest` uses a real model on three trips; `guard` uses the lying model from main.py and must
 still pass, which is the proof that the validator, not the model, owns the prices.
@@ -55,14 +55,14 @@ def task_with(model):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--model", help="LiteLLM alias (default: LLM_MODEL or openai-gpt)")
+    parser.add_argument("--llm", choices=["openai", "gemini", "ollama", "local"], help="which model, by gateway route (default: openai)")
     args = parser.parse_args()
     configure_telemetry("example-tool-facts-evals")
 
     ok = True
     print("\n### honest: a real model")
     honest = Dataset(name="honest", cases=CASES, evaluators=[PricesAreFacts(), RecommendsTheCheapest()])
-    report = honest.evaluate_sync(task_with(build_model(args.model)), max_concurrency=2)
+    report = honest.evaluate_sync(task_with(build_model(args.llm)), max_concurrency=2)
     report.print(include_input=False, include_output=False)
     ok &= all(a.value for c in report.cases for a in c.assertions.values())
 

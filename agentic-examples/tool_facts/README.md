@@ -11,11 +11,11 @@ cd agentic-examples/tool_facts      # its own uv project: the first run creates 
 task run                            # a real model quotes three dates and recommends one
 task run -- --liar                  # a model that lies about every price: watch the validator put the facts back
 task test                           # the guarantees, offline (no model, no network)
-task evals                          # score a model on the task; -- --model local-vllm to compare another
+task evals                          # score a model on the task; -- --llm gemini to compare another
 task run:local                      # the same, against vLLM on this Mac (cd ../../k8s && task inference:run first)
 ```
 
-By default the model is `openai-gpt` through the lab's LiteLLM, so the cluster must be up and `OPENAI_KEY` set. `--liar`,
+By default the model is `gpt-4o-mini` through the lab's LLM gateway, so the cluster must be up and `OPENAI_KEY` set (`--llm gemini` uses Gemini instead). `--liar`,
 `task test` and the `guard` half of `task evals` need no LLM at all.
 
 ## Read this in `main.py`
@@ -41,7 +41,7 @@ decisions that matter (who approves, what something costs) out of the model enti
 - Delete `facts_win` and run `--liar`: the lies come straight through. That is the whole argument for the validator.
 - Change `instructions` to "recommend the *most expensive* date" and run `task evals`: `RecommendsTheCheapest` fails, which is
   how a bad prompt shows up as a number.
-- Run `task evals -- --model local-vllm` and compare it with the default. Weaker models tend to fail on judgment, not on prices.
+- Run `task evals -- --llm gemini` and compare it with the default. Weaker models tend to fail on judgment, not on prices.
 - Give the tool an argument (`dates: list[str]`) and see how often a model gets it wrong; the desk's tools read the request instead.
 - Set `OTEL_EXPORTER_OTLP_ENDPOINT=http://grafana.lab:4318` and look at the run in Grafana → Tempo.
 

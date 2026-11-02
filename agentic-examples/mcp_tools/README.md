@@ -15,7 +15,7 @@ task serve                          # run server.py as an HTTP MCP server (then:
 task test                           # offline: the real server in-process, a scripted model
 ```
 
-The default needs only the lab's LiteLLM for the model; the bundled MCP server runs on your machine. With `--url` the
+The default needs only the lab's LLM gateway for the model; the bundled MCP server runs on your machine. With `--url` the
 tools come from the cluster (the lab must be up). The output lists every tool call the model made, so you can see it
 explore (it quotes several destinations before choosing).
 

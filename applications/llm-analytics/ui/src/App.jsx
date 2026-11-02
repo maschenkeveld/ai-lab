@@ -417,7 +417,7 @@ function HowItWorks() {
         </p>
         <p style={{ ...s.wishSub, marginTop: 8 }}>
           A better version would be an <strong>implementation agent</strong> that takes an accepted
-          recommendation, updates the relevant OSS gateway or LiteLLM configuration, validates the result,
+          recommendation, updates the relevant OSS gateway configuration, validates the result,
           and applies it — closing the loop from observation to running config without manual steps.
         </p>
       </div>

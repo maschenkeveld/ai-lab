@@ -37,10 +37,15 @@ spec:
               value: "http://agentgateway.lab/a2a/flight-scout"
             - name: AGENTGATEWAY_URL
               value: "http://agentgateway.lab"
-            - name: LITELLM_BASE_URL
-              value: "http://litellm.litellm.svc.cluster.local:4000/v1"
-            - name: LITELLM_MODEL
-              value: "openai-gpt"
+            - name: LLM_BASE_URL            # the route picks the model: /llm/openai, /gemini, /ollama or /local
+              value: "http://agentgateway.lab/llm/openai/v1"
+            - name: LLM_MODEL               # a label: the gateway replaces the model name with the backend's
+              value: "gpt-4o-mini"
+            - name: LLM_API_KEY             # the gateway's client key (the gateway holds the provider keys)
+              valueFrom:
+                secretKeyRef:
+                  name: llm-client-key
+                  key: LLM_API_KEY
 ---
 apiVersion: v1
 kind: Service

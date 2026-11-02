@@ -20,7 +20,7 @@ class FakeEmbedder:
 
 class BrokenEmbedder:
     async def embed_query(self, q):
-        raise ConnectionError("litellm down")
+        raise ConnectionError("embeddings endpoint down")
 
 
 async def test_ranks_by_cosine_similarity():

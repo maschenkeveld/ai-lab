@@ -1,22 +1,29 @@
 """Which model to call, and where traces go. Every example has its own copy of this file on purpose: each folder
 is self-contained, so change it freely without touching the others.
 
-By default the model is `openai-gpt` behind the lab's LiteLLM (http://litellm.lab/v1). To use anything else that
-speaks the OpenAI API, set LLM_BASE_URL, LLM_API_KEY and LLM_MODEL; `task run:local` does that for the vLLM
-server on your Mac (started with `cd k8s && task inference:run`).
+By default the model is OpenAI's gpt-4o-mini through the lab's LLM gateway (agentgateway): http://agentgateway.lab/llm/openai/v1,
+with the gateway's client key. The gateway picks the model by *route*, so `--llm gemini|ollama|local` (or LLM_ROUTE) selects another;
+set LLM_BASE_URL, LLM_API_KEY and LLM_MODEL to use any other OpenAI-compatible endpoint. `task run:local` skips the gateway and
+talks to the vLLM server on your Mac directly (start it with `cd k8s && task inference:run`).
 """
 import os
 
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
+ROUTES = {"openai": "gpt-4o-mini", "gemini": "gemini-2.5-pro", "ollama": "llama3.2", "local": "local"}  # route -> model label
 
-def build_model(name: str | None = None) -> OpenAIChatModel:
-    provider = OpenAIProvider(
-        base_url=os.getenv("LLM_BASE_URL", "http://litellm.lab/v1"),
-        api_key=os.getenv("LLM_API_KEY", "sk-ai-lab-litellm"),
-    )
-    return OpenAIChatModel(name or os.getenv("LLM_MODEL", "openai-gpt"), provider=provider)
+
+def build_model(route: str | None = None) -> OpenAIChatModel:
+    """The chat model for a gateway route (the gateway replaces the model name it is sent with the backend's own)."""
+    if route:
+        base_url, model = f"http://agentgateway.lab/llm/{route}/v1", ROUTES.get(route, route)
+    else:
+        env_route = os.getenv("LLM_ROUTE", "openai")
+        base_url = os.getenv("LLM_BASE_URL") or f"http://agentgateway.lab/llm/{env_route}/v1"
+        model = os.getenv("LLM_MODEL") or ROUTES.get(env_route, env_route)
+    provider = OpenAIProvider(base_url=base_url, api_key=os.getenv("LLM_API_KEY", "sk-ai-lab-gateway"))
+    return OpenAIChatModel(model, provider=provider)
 
 
 _provider = None

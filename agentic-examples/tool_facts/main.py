@@ -8,7 +8,7 @@ only real contribution is `recommended_date` and `reasoning`.
     task run              # a real model quotes and recommends
     task run -- --liar    # a model that lies about every price, to show the validator putting the facts back
     task test             # the same guarantees, offline
-    task evals            # score a model on the same task (-- --model <alias> to compare)
+    task evals            # score a model on the same task (-- --llm gemini to compare)
 
 Read `agent`, `quote_dates` and `facts_win` below; that is the whole idea.
 """
@@ -103,13 +103,13 @@ def lying_model(claimed: list[float]) -> FunctionModel:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--liar", action="store_true", help="use a model that lies about prices")
-    parser.add_argument("--model", help="LiteLLM alias (default: LLM_MODEL or openai-gpt)")
+    parser.add_argument("--llm", choices=["openai", "gemini", "ollama", "local"], help="which model, by gateway route (default: openai)")
     args = parser.parse_args()
 
     configure_telemetry("example-tool-facts")
     trip = Trip(origin="AMS", destination="VIE", dates=["2026-12-17", "2026-12-18", "2026-12-19"])
     claimed: list[float] = []
-    model = lying_model(claimed) if args.liar else build_model(args.model)
+    model = lying_model(claimed) if args.liar else build_model(args.llm)
     result = agent.run_sync("Which day should I fly?", model=model, deps=trip)
 
     print("Quotes from the tool (the facts):")

@@ -5,8 +5,8 @@ import re
 import pandas as pd
 import psycopg
 import yaml
-from sklearn.cluster import DBSCAN
 from sentence_transformers import SentenceTransformer
+from sklearn.cluster import DBSCAN
 
 POSTGRES_DSN = os.getenv("POSTGRES_DSN", "postgresql://postgres:postgres@postgres.llm-analytics.svc.cluster.local:5432/llm_analytics")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")

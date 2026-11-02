@@ -15,7 +15,6 @@ analytics.lab           llm-analytics-ui.llm-analytics.svc.cluster.local
 analytics-api.lab       llm-analytics-api.llm-analytics.svc.cluster.local
 grafana.lab             otel-lgtm.otel-lgtm.svc.cluster.local
 traefik-api-gw.lab      traefik.traefik.svc.cluster.local
-litellm.lab             traefik.traefik.svc.cluster.local
 agentgateway.lab        agentgateway-proxy.agentgateway-system.svc.cluster.local
 kafka-direct.lab        kafka-direct.kafka.svc.cluster.local
 EOF

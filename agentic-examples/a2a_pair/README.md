@@ -16,7 +16,7 @@ curl http://127.0.0.1:4500/.well-known/agent-card.json | jq .     # the scout's 
 task test                           # offline: the real scout in-process, a stub model
 ```
 
-Needs the lab's LiteLLM for the models (or `LLM_*` variables for another endpoint). Both agents use the same model here;
+Needs the lab's LLM gateway for the models (or `LLM_*` variables for another endpoint). Both agents use the same model here;
 nothing requires that, and you could point the scout at a different one.
 
 ## What A2A looks like

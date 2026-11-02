@@ -12,7 +12,6 @@ vars:
   NS_KEYCLOAK: keycloak
   NS_LLM_ANALYTICS: llm-analytics
   NS_TRAEFIK: traefik
-  NS_LITELLM: litellm
   NS_AGENTGATEWAY: agentgateway-system
   DESK_ROOT: "{{.TASKFILE_DIR}}/../applications/agents/travel-desk"
 
@@ -41,7 +40,7 @@ tasks:
         kubectl get svc -A --field-selector spec.type=LoadBalancer \
           -o custom-columns='NAMESPACE:.metadata.namespace,NAME:.metadata.name,EXTERNAL-IP:.status.loadBalancer.ingress[0].ip,PORTS:.spec.ports[*].port'
         echo ""
-        echo "Hostnames: traefik-api-gw.lab, litellm.lab, agentgateway.lab, kafka-direct.lab"
+        echo "Hostnames: traefik-api-gw.lab, agentgateway.lab, kafka-direct.lab"
         if [ "${KEYCLOAK_MODE:-local}" = "local" ]; then
           echo "  · Keycloak (local):        keycloak.lab:8080"
         else
@@ -255,7 +254,7 @@ tasks:
     desc: "Create OSS lab secrets"
     cmds:
       - task: secrets:keycloak-realm
-      - task: secrets:litellm
+      - task: secrets:llm-gateway
 
   secrets:keycloak-realm:
     desc: "Create keycloak-realm Secret from the realm export JSON — only in local Keycloak mode"
@@ -282,23 +281,23 @@ tasks:
         kubectl -n {{.NS_KEYCLOAK}} rollout restart statefulset/keycloak
         kubectl -n {{.NS_KEYCLOAK}} rollout status statefulset/keycloak --timeout=300s
 
-  secrets:litellm:
-    desc: "Create LiteLLM secrets from .env for the OSS LLM gateway"
+  secrets:llm-gateway:
+    desc: "Create the LLM gateway's secrets from .env: provider keys (OpenAI, Gemini, local vLLM) and the client key"
     cmds:
       - |
-        kubectl create secret generic litellm-env \
-          --namespace {{.NS_LITELLM}} \
-          --from-literal=LITELLM_MASTER_KEY="${LITELLM_MASTER_KEY:-sk-ai-lab-litellm}" \
-          --from-literal=OPENAI_API_KEY="${OPENAI_KEY:-}" \
-          --from-literal=GEMINI_API_KEY="${GEMINI_KEY:-}" \
-          --from-literal=VLLM_API_KEY="${VLLM_API_KEY:-unset}" \
-          --from-literal=VLLM_BACKEND_MODEL="openai/${VLLM_MODEL:-unset}" \
-          --from-literal=VLLM_BASE_URL="$(task -d {{.TASKFILE_DIR}} inference:url 2>/dev/null || echo http://127.0.0.1:${VLLM_PORT:-8000}/v1)" \
-          --dry-run=client -o yaml | kubectl apply -f -
-        echo "✓ LiteLLM env secret applied to {{.NS_LITELLM}}"
+        mk() { kubectl -n agentgateway-system create secret generic "$1" --from-literal="$2"="$3" --dry-run=client -o yaml | kubectl apply -f - >/dev/null; }
+        mk llm-openai-key Authorization "${OPENAI_KEY:-unset}"
+        mk llm-gemini-key Authorization "${GEMINI_KEY:-unset}"
+        mk llm-local-key Authorization "${VLLM_API_KEY:-unset}"
+        # clients (agents, examples, evals) send this key; the gateway swaps in the provider's own key upstream
+        mk llm-gateway-client-keys clients "${LLM_GATEWAY_KEY:-sk-ai-lab-gateway}"
+        # the desk's agents read the same client key from a Secret in their own namespace
+        kubectl create namespace travel-desk --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+        kubectl -n travel-desk create secret generic llm-client-key --from-literal=LLM_API_KEY="${LLM_GATEWAY_KEY:-sk-ai-lab-gateway}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+        echo "✓ LLM gateway secrets applied (agentgateway-system, and the client key in travel-desk)"
 
   inference:install:
-    desc: "Install vLLM-Metal on the Mac host (Apple Silicon) for the local-vllm alias and the examples"
+    desc: "Install vLLM-Metal on the Mac host (Apple Silicon) for the gateway's /llm/local route and the examples"
     platforms: [darwin]
     cmds:
       - brew tap vllm-project/vllm-metal https://github.com/vllm-project/vllm-metal
@@ -465,17 +464,17 @@ tasks:
       - task: gateway-api-crds
 
   oss:manifests-apply:
-    desc: "Apply OSS gateway, LLM, direct Kafka, and travel-desk manifests"
+    desc: "Apply the OSS gateways (Traefik, agentgateway incl. LLM), direct Kafka, and the travel desk"
     cmds:
       - kubectl apply -f {{.TASKFILE_DIR}}/oss/traefik/
       - kubectl apply -f {{.TASKFILE_DIR}}/oss/agentgateway/
       - kubectl apply -f {{.TASKFILE_DIR}}/oss/kafka/
-      - kubectl apply -f {{.TASKFILE_DIR}}/oss/litellm/
+      - task: llm-gateway:apply
       - task: oss:desk-apply
       - kubectl apply -f {{.TASKFILE_DIR}}/oss/routes/
 
   eval:
-    desc: "Run the desk evals (pydantic-evals) against the live lab; e.g. `task eval -- --suite extraction --model local-vllm`"
+    desc: "Run the desk evals (pydantic-evals) against the live lab; e.g. `task eval -- --suite extraction --llm gemini`"
     dir: "{{.DESK_ROOT}}/evals"
     cmds:
       - uv run python run_eval.py {{.CLI_ARGS}}
@@ -495,12 +494,9 @@ tasks:
       - kubectl rollout restart deploy -n travel-desk
 
   llm-gateway:apply:
-    desc: "Route LLM traffic through agentgateway too (an alternative to LiteLLM): secrets, backends and routes"
+    desc: "Apply the LLM gateway: backends, routes, guardrails and client-key policies (secrets: `task secrets:llm-gateway`)"
     cmds:
       - |
-        : "${OPENAI_KEY:?Set OPENAI_KEY in .env}"
-        kubectl -n agentgateway-system create secret generic llm-openai-key --from-literal=Authorization="${OPENAI_KEY}" --dry-run=client -o yaml | kubectl apply -f -
-        kubectl -n agentgateway-system create secret generic llm-local-key --from-literal=Authorization="${VLLM_API_KEY:-unset}" --dry-run=client -o yaml | kubectl apply -f -
         URL=$(task -d {{.TASKFILE_DIR}} inference:url 2>/dev/null || echo "http://127.0.0.1:${VLLM_PORT:-8000}/v1")
         HOST=$(echo "$URL" | sed -E 's#^https?://([^:/]+).*#\1#')
         sed "s#__VLLM_HOST__#${HOST}#; s#__VLLM_PORT__#${VLLM_PORT:-8000}#; s#__VLLM_MODEL__#${VLLM_MODEL:-unset}#" {{.TASKFILE_DIR}}/oss/llm-gateway/llm-gateway.yaml | kubectl apply -f -
@@ -529,28 +525,24 @@ tasks:
       - kubectl -n agentregistry port-forward svc/agentregistry 12121:12121
 
   desk:llm:
-    desc: "Point the desk at an LLM path: `task desk:llm -- gateway` (agentgateway, OpenAI), `-- gateway-local` (agentgateway, vLLM) or `-- litellm`"
+    desc: "Point the desk at another model: `task desk:llm -- openai | gemini | ollama | local` (the route picks the model)"
     cmds:
       - |
         case "{{.CLI_ARGS}}" in
-          gateway)       URL=http://agentgateway.lab/llm/openai/v1 ;;
-          gateway-local) URL=http://agentgateway.lab/llm/local/v1 ;;
-          litellm)       URL=http://litellm.litellm.svc.cluster.local:4000/v1 ;;
-          *) echo "usage: task desk:llm -- gateway | gateway-local | litellm"; exit 1 ;;
+          openai) MODEL=gpt-4o-mini ;;
+          gemini) MODEL=gemini-2.5-pro ;;
+          ollama) MODEL=llama3.2 ;;
+          local)  MODEL="${VLLM_MODEL:-local}" ;;
+          *) echo "usage: task desk:llm -- openai | gemini | ollama | local"; exit 1 ;;
         esac
-        kubectl set env deploy --all -n travel-desk LITELLM_BASE_URL="$URL"
-
-  desk:model:
-    desc: "Point every desk agent at another LiteLLM alias, e.g. `task desk:model -- local-vllm`"
-    cmds:
-      - kubectl set env deploy --all -n travel-desk LITELLM_MODEL={{.CLI_ARGS}}
+        kubectl set env deploy --all -n travel-desk LLM_BASE_URL="http://agentgateway.lab/llm/{{.CLI_ARGS}}/v1" LLM_MODEL="$MODEL"
 
   oss:manifests-delete:
-    desc: "Delete OSS gateway, LLM, direct Kafka, and travel-desk manifests"
+    desc: "Delete the OSS gateways, LLM gateway, direct Kafka, and travel-desk manifests"
     cmds:
       - kubectl delete -f {{.TASKFILE_DIR}}/oss/routes/ || true
       - kubectl delete -f {{.TASKFILE_DIR}}/oss/travel-desk/ || true
-      - kubectl delete -f {{.TASKFILE_DIR}}/oss/litellm/ || true
+      - kubectl delete -f {{.TASKFILE_DIR}}/oss/llm-gateway/ || true
       - kubectl delete -f {{.TASKFILE_DIR}}/oss/kafka/ || true
       - kubectl delete -f {{.TASKFILE_DIR}}/oss/agentgateway/ || true
       - kubectl delete -f {{.TASKFILE_DIR}}/oss/traefik/ || true

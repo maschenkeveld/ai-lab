@@ -45,13 +45,13 @@ def tool_calls(messages) -> list[str]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--url", help="an MCP server URL instead of the bundled stdio server")
-    parser.add_argument("--model", help="LiteLLM alias (default: LLM_MODEL or openai-gpt)")
+    parser.add_argument("--llm", choices=["openai", "gemini", "ollama", "local"], help="which model, by gateway route (default: openai)")
     parser.add_argument("question", nargs="?", default="I want a culture trip from AMS on 2026-12-18. What do you suggest, and what is the flight?")
     args = parser.parse_args()
 
     configure_telemetry("example-mcp-tools")
     agent = build_agent(args.url or str(HERE / "server.py"))
-    result = agent.run_sync(args.question, model=build_model(args.model))
+    result = agent.run_sync(args.question, model=build_model(args.llm))
 
     print("Tool calls the model made over MCP:")
     for call in tool_calls(result.all_messages()):

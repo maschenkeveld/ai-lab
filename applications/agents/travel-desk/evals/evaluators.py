@@ -14,6 +14,11 @@ class ExtractionMatches(Evaluator[str, dict[str, Any], Any]):
 
     def evaluate(self, ctx: EvaluatorContext[str, dict[str, Any], Any]) -> dict[str, bool | float]:
         got, want = ctx.output, ctx.expected_output or {}
+        if got.get("_blocked_by_gateway"):
+            # The gateway's guardrail rejected the prompt before any model saw it. For a case built to be hostile that is a
+            # correct outcome (the traveller's request was never read, so nothing wrong was extracted); for any other it is a failure.
+            allowed = bool((ctx.metadata or {}).get("may_be_blocked"))
+            return {"blocked_by_gateway": True, "all_fields": allowed, "field_score": 1.0 if allowed else 0.0}
         results: dict[str, bool | float] = {}
         for key, expected in want.items():
             actual = got.get(key)
@@ -32,6 +37,8 @@ class OnlyAllowedValues(Evaluator[str, dict[str, Any], Any]):
     """Vibes and activities stay inside the vocabularies the downstream services accept (anything else is a 400)."""
 
     def evaluate(self, ctx: EvaluatorContext[str, dict[str, Any], Any]) -> bool:
+        if ctx.output.get("_blocked_by_gateway"):
+            return True  # nothing was extracted, so nothing can be out of vocabulary
         vibes = {"culture", "city", "food", "design", "nature", "relax", "nightlife", "beach"}
         activities = {"museums", "architecture", "shopping", "music", "walking"}
         return (set(ctx.output.get("vibes", [])) <= vibes and set(ctx.output.get("activities", [])) <= activities

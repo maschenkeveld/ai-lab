@@ -15,7 +15,7 @@ task run -- --deny "too expensive"  # decide automatically: deny, and watch what
 task test                           # offline (a scripted model): a denied booking never runs
 ```
 
-Needs the lab's LiteLLM for the model (or `task run:local` for vLLM on your Mac). The tests need no model.
+Needs the lab's LLM gateway for the model (or `task run:local` for vLLM on your Mac). The tests need no model.
 
 ## Read this in `main.py`
 

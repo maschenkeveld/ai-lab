@@ -4,7 +4,7 @@ version: '3'
 
 tasks:
   run:
-    desc: Run main.py against the lab's LiteLLM (add -- --liar for the lying model, no LLM needed)
+    desc: Run main.py against the lab's LLM gateway (add -- --liar for the lying model, no LLM needed)
     cmds:
       - uv run --env-file ../../.env python main.py {{.CLI_ARGS}}
 
@@ -22,6 +22,6 @@ tasks:
       - uv run pytest -q
 
   evals:
-    desc: Score a model on the task (-- --model <alias> to compare)
+    desc: Score a model on the task (-- --llm <openai|gemini|ollama|local> to compare)
     cmds:
       - uv run --env-file ../../.env python evals.py {{.CLI_ARGS}}

@@ -5,9 +5,9 @@ Every folder is **self-contained**: its own `pyproject.toml`, `uv.lock` and `.ve
 `Taskfile.yml`, README and tests. Nothing is imported from another folder or from the rest of the repo, so you can copy one
 out, break it, and the others keep working.
 
-They need no cluster unless a README says so. The default model is `openai-gpt` through the lab's LiteLLM (`OPENAI_KEY` in the
+They need no cluster unless a README says so. The default model is OpenAI's `gpt-4o-mini` through the lab's LLM gateway (agentgateway; `OPENAI_KEY` in the
 repo's `.env`); every example also runs against a model on your Mac with `task run:local` (start it with
-`cd ../k8s && task inference:run`), or against any OpenAI-compatible endpoint with `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`.
+`cd ../k8s && task inference:run`), or against any OpenAI-compatible endpoint with `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`. `--llm gemini|ollama|local` picks another model by gateway route.
 Set `OTEL_EXPORTER_OTLP_ENDPOINT=http://grafana.lab:4318` to see the runs in Grafana → Tempo.
 
 ## The examples, in a sensible order

@@ -1,12 +1,17 @@
-# LLM traffic through agentgateway (an alternative to LiteLLM): one backend per model, one route per backend.
+# The lab's LLM gateway: every model call goes through agentgateway.
 #
-#   http://agentgateway.lab/llm/openai/v1/chat/completions   -> OpenAI chat   (model forced to gpt-4o-mini)
-#   http://agentgateway.lab/llm/openai/v1/embeddings         -> OpenAI embeddings (model forced to text-embedding-3-small)
-#   http://agentgateway.lab/llm/local/v1/chat/completions    -> vLLM on the Mac (model forced to the one it serves)
+#   http://agentgateway.lab/llm/openai/v1    OpenAI chat (gpt-4o-mini) and embeddings (text-embedding-3-small)
+#   http://agentgateway.lab/llm/gemini/v1    Gemini (gemini-2.5-pro)
+#   http://agentgateway.lab/llm/ollama/v1    Ollama on the Mac (llama3.2)
+#   http://agentgateway.lab/llm/local/v1     vLLM-Metal on the Mac (the model `task inference:run` serves)
 #
-# Clients keep using an OpenAI client with base_url=http://agentgateway.lab/llm/<backend>/v1. The `model` they send is
-# replaced by the backend's model, which is the "alias" mechanism, and the gateway adds the provider's API key, so clients
-# never hold it. Apply with `task llm-gateway:apply` (it creates the secrets and fills in the placeholders); switch the desk with `task desk:llm -- gateway`.
+# Clients use any OpenAI client with base_url=<one of the above> and `Authorization: Bearer <LLM_GATEWAY_KEY>`. The model
+# is chosen by the route; the `model` a client sends is replaced by the backend's model, and the gateway adds the provider's
+# own key, so clients never hold one. Guardrails run in front of every chat backend: a prompt-injection phrase is rejected
+# with a 403 and emails, card numbers and SSNs are masked before the model sees them.
+#
+# Apply with `task llm-gateway:apply` (it fills in the placeholders); the secrets come from `task secrets:llm-gateway`.
+---
 apiVersion: agentgateway.dev/v1alpha1
 kind: AgentgatewayBackend
 metadata:
@@ -25,7 +30,6 @@ spec:
       routes:
         "/v1/chat/completions": Completions
         "/v1/models": Models
-      # What LiteLLM does not give this lab: guardrails in the gateway, before a prompt reaches a provider.
       promptGuard:
         request:
           - regex:
@@ -60,6 +64,67 @@ spec:
 apiVersion: agentgateway.dev/v1alpha1
 kind: AgentgatewayBackend
 metadata:
+  name: llm-gemini
+  namespace: agentgateway-system
+spec:
+  ai:
+    provider:
+      gemini:
+        model: gemini-2.5-pro
+  policies:
+    auth:
+      secretRef:
+        name: llm-gemini-key
+    ai:
+      routes:
+        "/v1/chat/completions": Completions
+        "/v1/models": Models
+      promptGuard:
+        request:
+          - regex:
+              action: Reject
+              matches:
+                - "(?i)ignore (all |your )?(previous |prior )?instructions"
+            response:
+              message: "Blocked by the gateway: looks like a prompt-injection attempt."
+              statusCode: 403
+          - regex:
+              action: Mask            # personal data is replaced before the model sees it
+              builtins: [CreditCard, Ssn, Email]
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: llm-ollama
+  namespace: agentgateway-system
+spec:
+  ai:
+    provider:
+      host: ollama.default.svc.cluster.local     # Ollama on the Mac, through the cluster's `ollama` Service
+      port: 11434
+      openai:
+        model: llama3.2
+  policies:
+    ai:
+      routes:
+        "/v1/chat/completions": Completions
+        "/v1/models": Models
+      promptGuard:
+        request:
+          - regex:
+              action: Reject
+              matches:
+                - "(?i)ignore (all |your )?(previous |prior )?instructions"
+            response:
+              message: "Blocked by the gateway: looks like a prompt-injection attempt."
+              statusCode: 403
+          - regex:
+              action: Mask            # personal data is replaced before the model sees it
+              builtins: [CreditCard, Ssn, Email]
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
   name: llm-local
   namespace: agentgateway-system
 spec:
@@ -77,6 +142,18 @@ spec:
       routes:
         "/v1/chat/completions": Completions
         "/v1/models": Models
+      promptGuard:
+        request:
+          - regex:
+              action: Reject
+              matches:
+                - "(?i)ignore (all |your )?(previous |prior )?instructions"
+            response:
+              message: "Blocked by the gateway: looks like a prompt-injection attempt."
+              statusCode: 403
+          - regex:
+              action: Mask            # personal data is replaced before the model sees it
+              builtins: [CreditCard, Ssn, Email]
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
@@ -122,6 +199,60 @@ spec:
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
+  name: llm-gemini
+  namespace: agentgateway-system
+spec:
+  parentRefs:
+    - name: agentgateway-proxy
+      sectionName: http
+  hostnames:
+    - agentgateway.lab
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /llm/gemini
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /
+      backendRefs:
+        - name: llm-gemini
+          group: agentgateway.dev
+          kind: AgentgatewayBackend
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: llm-ollama
+  namespace: agentgateway-system
+spec:
+  parentRefs:
+    - name: agentgateway-proxy
+      sectionName: http
+  hostnames:
+    - agentgateway.lab
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /llm/ollama
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /
+      backendRefs:
+        - name: llm-ollama
+          group: agentgateway.dev
+          kind: AgentgatewayBackend
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
   name: llm-local
   namespace: agentgateway-system
 spec:
@@ -145,3 +276,71 @@ spec:
         - name: llm-local
           group: agentgateway.dev
           kind: AgentgatewayBackend
+---
+# Every LLM route needs a client key: without it, anyone who can reach the gateway could spend the provider keys.
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: llm-openai-auth
+  namespace: agentgateway-system
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: llm-openai
+  traffic:
+    apiKeyAuthentication:
+      mode: Strict
+      secretRef:
+        name: llm-gateway-client-keys
+---
+# Every LLM route needs a client key: without it, anyone who can reach the gateway could spend the provider keys.
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: llm-gemini-auth
+  namespace: agentgateway-system
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: llm-gemini
+  traffic:
+    apiKeyAuthentication:
+      mode: Strict
+      secretRef:
+        name: llm-gateway-client-keys
+---
+# Every LLM route needs a client key: without it, anyone who can reach the gateway could spend the provider keys.
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: llm-ollama-auth
+  namespace: agentgateway-system
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: llm-ollama
+  traffic:
+    apiKeyAuthentication:
+      mode: Strict
+      secretRef:
+        name: llm-gateway-client-keys
+---
+# Every LLM route needs a client key: without it, anyone who can reach the gateway could spend the provider keys.
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: llm-local-auth
+  namespace: agentgateway-system
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: llm-local
+  traffic:
+    apiKeyAuthentication:
+      mode: Strict
+      secretRef:
+        name: llm-gateway-client-keys

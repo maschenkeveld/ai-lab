@@ -56,11 +56,6 @@ metadata:
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: litellm
----
-apiVersion: v1
-kind: Namespace
-metadata:
   name: agentgateway-system
 ---
 apiVersion: v1

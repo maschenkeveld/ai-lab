@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ $(uname -s) != Darwin ]]; then
-  echo 'vLLM-Metal requires macOS Apple Silicon. Point LiteLLM to a Linux/cloud vLLM instance instead.' >&2
+  echo 'vLLM-Metal requires macOS Apple Silicon. Point the gateway's llm-local backend (k8s/oss/llm-gateway) at a Linux/cloud vLLM instance instead.' >&2
   exit 1
 fi
 if [[ ! -f .env ]]; then echo 'Copy .env.example to .env and set VLLM_API_KEY first.' >&2; exit 1; fi

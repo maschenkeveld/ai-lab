@@ -44,7 +44,7 @@ spec:
     image: travel-desk-coordinator:latest
     protocol: A2A
   modelProvider: openai
-  modelName: openai-gpt
+  modelName: gpt-4o-mini
 ---
 apiVersion: ar.dev/v1alpha1
 kind: Agent
@@ -62,7 +62,7 @@ spec:
     image: travel-desk-destination-scout:latest
     protocol: A2A
   modelProvider: openai
-  modelName: openai-gpt
+  modelName: gpt-4o-mini
   mcpServers:
     - kind: MCPServer
       name: mcp-travel-search
@@ -84,7 +84,7 @@ spec:
     image: travel-desk-flight-scout:latest
     protocol: A2A
   modelProvider: openai
-  modelName: openai-gpt
+  modelName: gpt-4o-mini
   mcpServers:
     - kind: MCPServer
       name: mcp-travel-search
@@ -126,7 +126,7 @@ spec:
     image: travel-desk-fare-watcher:latest
     protocol: A2A
   modelProvider: openai
-  modelName: openai-gpt
+  modelName: gpt-4o-mini
   mcpServers:
     - kind: MCPServer
       name: mcp-travel-search

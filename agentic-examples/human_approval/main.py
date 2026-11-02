@@ -91,13 +91,13 @@ def main() -> None:
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--approve", action="store_true", help="approve every request without asking")
     group.add_argument("--deny", metavar="REASON", help="deny every request with this reason")
-    parser.add_argument("--model", help="LiteLLM alias (default: LLM_MODEL or openai-gpt)")
+    parser.add_argument("--llm", choices=["openai", "gemini", "ollama", "local"], help="which model, by gateway route (default: openai)")
     parser.add_argument("request", nargs="?", default="I want a cheap trip to Brussels or Vienna. Book the best option.")
     args = parser.parse_args()
 
     decide: Decide = (lambda call: True) if args.approve else (lambda call: args.deny) if args.deny else ask_the_human
     configure_telemetry("example-human-approval")
-    result, ledger = run_with_approvals(args.request, decide, model=build_model(args.model))
+    result, ledger = run_with_approvals(args.request, decide, model=build_model(args.llm))
     print(f"\nAgent: {result.output}")
     print(f"\nBooked in the ledger: {ledger.booked or 'nothing'}")
     shutdown_telemetry()

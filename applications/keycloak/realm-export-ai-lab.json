@@ -10,19 +10,6 @@
   "bruteForceProtected": false,
   "clients": [
     {
-      "clientId": "litellm",
-      "name": "LiteLLM",
-      "enabled": true,
-      "protocol": "openid-connect",
-      "publicClient": false,
-      "serviceAccountsEnabled": true,
-      "secret": "litellm-secret",
-      "standardFlowEnabled": false,
-      "directAccessGrantsEnabled": false,
-      "redirectUris": [],
-      "webOrigins": []
-    },
-    {
       "clientId": "agentgateway",
       "name": "agentgateway",
       "enabled": true,
