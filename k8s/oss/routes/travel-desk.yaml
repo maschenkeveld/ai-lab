@@ -1,0 +1,125 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: a2a-trip-coordinator
+  namespace: travel-desk
+spec:
+  parentRefs:
+    - name: agentgateway-proxy
+      namespace: agentgateway-system
+      sectionName: http
+  hostnames:
+    - agentgateway.lab
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /a2a/trip-coordinator
+      backendRefs:
+        - name: coordinator
+          port: 4300
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: a2a-destination-scout
+  namespace: travel-desk
+spec:
+  parentRefs:
+    - name: agentgateway-proxy
+      namespace: agentgateway-system
+      sectionName: http
+  hostnames:
+    - agentgateway.lab
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /a2a/destination-scout
+      backendRefs:
+        - name: destination-scout
+          port: 4301
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: a2a-flight-scout
+  namespace: travel-desk
+spec:
+  parentRefs:
+    - name: agentgateway-proxy
+      namespace: agentgateway-system
+      sectionName: http
+  hostnames:
+    - agentgateway.lab
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /a2a/flight-scout
+      backendRefs:
+        - name: flight-scout
+          port: 4302
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: a2a-booking-agent
+  namespace: travel-desk
+spec:
+  parentRefs:
+    - name: agentgateway-proxy
+      namespace: agentgateway-system
+      sectionName: http
+  hostnames:
+    - agentgateway.lab
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /a2a/booking-agent
+      backendRefs:
+        - name: booking-agent
+          port: 4303
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: a2a-fare-watcher
+  namespace: travel-desk
+spec:
+  parentRefs:
+    - name: agentgateway-proxy
+      namespace: agentgateway-system
+      sectionName: http
+  hostnames:
+    - agentgateway.lab
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /a2a/fare-watcher
+      backendRefs:
+        - name: fare-watcher
+          port: 4304
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: desk-ui
+  namespace: travel-desk
+spec:
+  parentRefs:
+    - name: agentgateway-proxy
+      namespace: agentgateway-system
+      sectionName: http
+  hostnames:
+    - agentgateway.lab
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /desk
+      backendRefs:
+        - name: coordinator
+          port: 4300

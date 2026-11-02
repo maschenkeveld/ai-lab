@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fare-watcher
+  namespace: travel-desk
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate   # one workflow engine per database: never two pods of the same agent at once
+  selector:
+    matchLabels:
+      app: fare-watcher
+  template:
+    metadata:
+      labels:
+        app: fare-watcher
+    spec:
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:16-alpine
+          command: ["sh", "-c", "until pg_isready -h desk-postgres -U postgres; do sleep 2; done"]
+      containers:
+        - name: fare-watcher
+          image: travel-desk-fare-watcher:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 4304
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 4304
+            periodSeconds: 5
+          env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: __OTEL_ENDPOINT__
+            - name: PORT
+              value: "4304"
+            - name: AGENT_NAME
+              value: "fare-watcher"
+            - name: PUBLIC_AGENT_BASE_URL
+              value: "http://agentgateway.lab/a2a/fare-watcher"
+            - name: AGENTGATEWAY_URL
+              value: "http://agentgateway.lab"
+            - name: LITELLM_BASE_URL
+              value: "http://litellm.litellm.svc.cluster.local:4000/v1"
+            - name: LITELLM_MODEL
+              value: "openai-gpt"
+            - name: DATABASE_URL
+              value: "postgresql://postgres:postgres@desk-postgres.travel-desk.svc.cluster.local:5432/fare_watcher"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fare-watcher
+  namespace: travel-desk
+spec:
+  selector:
+    app: fare-watcher
+  ports:
+    - name: http
+      port: 4304
+      targetPort: 4304

@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flight-scout
+  namespace: travel-desk
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate   # one workflow engine per database: never two pods of the same agent at once
+  selector:
+    matchLabels:
+      app: flight-scout
+  template:
+    metadata:
+      labels:
+        app: flight-scout
+    spec:
+      containers:
+        - name: flight-scout
+          image: travel-desk-flight-scout:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 4302
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 4302
+            periodSeconds: 5
+          env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: __OTEL_ENDPOINT__
+            - name: PORT
+              value: "4302"
+            - name: AGENT_NAME
+              value: "flight-scout"
+            - name: PUBLIC_AGENT_BASE_URL
+              value: "http://agentgateway.lab/a2a/flight-scout"
+            - name: AGENTGATEWAY_URL
+              value: "http://agentgateway.lab"
+            - name: LITELLM_BASE_URL
+              value: "http://litellm.litellm.svc.cluster.local:4000/v1"
+            - name: LITELLM_MODEL
+              value: "openai-gpt"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flight-scout
+  namespace: travel-desk
+spec:
+  selector:
+    app: flight-scout
+  ports:
+    - name: http
+      port: 4302
+      targetPort: 4302

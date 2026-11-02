@@ -1,0 +1,75 @@
+# Postgres for the desk: one server, one database per service. The coordinator and the fare-watcher keep their
+# own state AND their DBOS workflow checkpoints here, which is what lets them resume after a restart.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: desk-postgres-init
+  namespace: travel-desk
+data:
+  10-databases.sql: |
+    CREATE DATABASE fare_watcher;
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: desk-postgres
+  namespace: travel-desk
+spec:
+  serviceName: desk-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: desk-postgres
+  template:
+    metadata:
+      labels:
+        app: desk-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: postgres
+            - name: POSTGRES_PASSWORD
+              value: postgres
+            - name: POSTGRES_DB
+              value: coordinator
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres"]
+            periodSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: init
+              mountPath: /docker-entrypoint-initdb.d
+      volumes:
+        - name: init
+          configMap:
+            name: desk-postgres-init
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: desk-postgres
+  namespace: travel-desk
+spec:
+  selector:
+    app: desk-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432

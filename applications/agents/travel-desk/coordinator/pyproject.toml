@@ -1,0 +1,31 @@
+[project]
+name = "travel-coordinator"
+version = "0.1.0"
+description = "Trip coordinator — a durable workflow that researches, holds, gets human approval, books and monitors a trip"
+requires-python = ">=3.12"
+dependencies = [
+  "travel-common",
+  "dbos>=2.10.0",
+  "fastapi>=0.115.0",
+  "psycopg[binary,pool]>=3.2.13",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+
+[tool.uv.sources]
+travel-common = { path = "../common", editable = true }
+
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["travel_coordinator*"]
+
+[tool.setuptools.package-data]
+travel_coordinator = ["static/*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

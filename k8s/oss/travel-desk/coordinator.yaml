@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coordinator
+  namespace: travel-desk
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate   # one workflow engine per database: never two pods of the same agent at once
+  selector:
+    matchLabels:
+      app: coordinator
+  template:
+    metadata:
+      labels:
+        app: coordinator
+    spec:
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:16-alpine
+          command: ["sh", "-c", "until pg_isready -h desk-postgres -U postgres; do sleep 2; done"]
+      containers:
+        - name: coordinator
+          image: travel-desk-coordinator:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 4300
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 4300
+            periodSeconds: 5
+          env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: __OTEL_ENDPOINT__
+            - name: PORT
+              value: "4300"
+            - name: AGENT_NAME
+              value: "trip-coordinator"
+            - name: PUBLIC_AGENT_BASE_URL
+              value: "http://agentgateway.lab/a2a/trip-coordinator"
+            - name: AGENTGATEWAY_URL
+              value: "http://agentgateway.lab"
+            - name: LITELLM_BASE_URL
+              value: "http://litellm.litellm.svc.cluster.local:4000/v1"
+            - name: LITELLM_MODEL
+              value: "openai-gpt"
+            - name: DATABASE_URL
+              value: "postgresql://postgres:postgres@desk-postgres.travel-desk.svc.cluster.local:5432/coordinator"
+            - name: DEMO_MODE
+              value: "true"
+            - name: FLIGHTS_REST_URL
+              value: "http://rest-flights.rest-flights.svc.cluster.local:8000"
+            - name: AGENT_DESTINATION_SCOUT
+              value: "http://agentgateway.lab/a2a/destination-scout"
+            - name: AGENT_FLIGHT_SCOUT
+              value: "http://agentgateway.lab/a2a/flight-scout"
+            - name: AGENT_BOOKING
+              value: "http://agentgateway.lab/a2a/booking-agent"
+            - name: AGENT_FARE_WATCHER
+              value: "http://agentgateway.lab/a2a/fare-watcher"
+            - name: AUTO_APPROVE_BELOW_EUR
+              value: "60"
+            - name: SECOND_APPROVER_FROM_EUR
+              value: "180"
+            - name: APPROVAL_TTL_SECONDS
+              value: "900"
+            - name: ESCALATE_AFTER_SECONDS
+              value: "300"
+            - name: MONITOR_SECONDS
+              value: "1800"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: coordinator
+  namespace: travel-desk
+spec:
+  selector:
+    app: coordinator
+  ports:
+    - name: http
+      port: 4300
+      targetPort: 4300

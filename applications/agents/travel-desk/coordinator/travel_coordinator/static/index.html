@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Travel desk</title>
+  <link rel="stylesheet" href="static/style.css">
+</head>
+<body>
+  <header>
+    <div class="brand"><span class="logo">✈</span> Travel desk <small>human-in-the-loop booking</small></div>
+    <div id="pending-badge" class="pill hidden"></div>
+    <label class="who">Approving as
+      <input id="approver" placeholder="your name" maxlength="40" autocomplete="off">
+    </label>
+  </header>
+
+  <main>
+    <aside>
+      <section class="card">
+        <h2>New trip</h2>
+        <textarea id="request" rows="4" placeholder="e.g. A culture weekend from Amsterdam around 18 December, mid budget, I love museums."></textarea>
+        <div class="chips" id="examples"></div>
+        <button id="create" class="primary">Plan it</button>
+        <p id="create-error" class="error"></p>
+      </section>
+      <section>
+        <h2>Trips</h2>
+        <ul id="trips" class="list"></ul>
+      </section>
+      <section class="card small" id="policy"></section>
+    </aside>
+
+    <section id="detail"><div class="empty">Pick a trip, or plan a new one.</div></section>
+  </main>
+
+  <dialog id="edit-dialog">
+    <form method="dialog">
+      <h3>Edit the proposal</h3>
+      <p class="muted">Pick a different destination or date. The current hold is released and a new proposal is researched; it needs approval again.</p>
+      <label>Destination <select id="edit-destination"></select></label>
+      <label>Date <input id="edit-date" type="date"></label>
+      <label>Why? <input id="edit-comment" placeholder="optional"></label>
+      <div class="row"><button value="cancel">Cancel</button><button id="edit-confirm" value="ok" class="primary">Send edit</button></div>
+    </form>
+  </dialog>
+
+  <script src="static/app.js"></script>
+</body>
+</html>

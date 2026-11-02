@@ -8,14 +8,13 @@ vars:
   NS_KAFKA: kafka
   NS_REDIS: redis
   NS_OTEL: otel-lgtm
-  NS_MCP_DICE: mcp-dice-roller
   NS_METALLB: metallb-system
   NS_KEYCLOAK: keycloak
   NS_LLM_ANALYTICS: llm-analytics
   NS_TRAEFIK: traefik
   NS_LITELLM: litellm
   NS_AGENTGATEWAY: agentgateway-system
-  AGENTS_ROOT: "{{.TASKFILE_DIR}}/../applications/agents/travel-agency"
+  DESK_ROOT: "{{.TASKFILE_DIR}}/../applications/agents/travel-desk"
 
 tasks:
   # ─── Top-level ────────────────────────────────────────────────────────────
@@ -160,38 +159,16 @@ tasks:
   build:
     desc: "Build OSS lab custom images and load them into kind"
     cmds:
-      - task: build:mcp-dice-roller
-      - task: build:mcp-destinations
-      - task: build:mcp-flights
-      - task: build:mcp-book-flights
       - task: build:rest-destinations
       - task: build:rest-flights
       - task: build:rest-book-flights
-      - task: build:agency
+      - task: build:mcp-travel-search
+      - task: build:mcp-bookings
+      - task: build:desk
       - task: build:llm-ingestor
       - task: build:llm-analyzer
       - task: build:llm-analytics-api
       - task: build:llm-analytics-ui
-
-  build:mcp-dice-roller:
-    cmds:
-      - docker build -t mcp-dice-roller:latest {{.APP_ROOT}}/mcp-servers/dice-roller
-      - kind load docker-image mcp-dice-roller:latest --name {{.KIND_CLUSTER}}
-
-  build:mcp-destinations:
-    cmds:
-      - docker build -t mcp-destinations:latest {{.APP_ROOT}}/mcp-servers/destinations-adapter
-      - kind load docker-image mcp-destinations:latest --name {{.KIND_CLUSTER}}
-
-  build:mcp-flights:
-    cmds:
-      - docker build -t mcp-flights:latest {{.APP_ROOT}}/mcp-servers/flights-adapter
-      - kind load docker-image mcp-flights:latest --name {{.KIND_CLUSTER}}
-
-  build:mcp-book-flights:
-    cmds:
-      - docker build -t mcp-book-flights:latest {{.APP_ROOT}}/mcp-servers/book-flights-adapter
-      - kind load docker-image mcp-book-flights:latest --name {{.KIND_CLUSTER}}
 
   build:rest-destinations:
     cmds:
@@ -208,39 +185,49 @@ tasks:
       - docker build -t rest-book-flights:latest {{.APP_ROOT}}/rest-servers/book-flights
       - kind load docker-image rest-book-flights:latest --name {{.KIND_CLUSTER}}
 
-  build:agency:
-    desc: "Build every Pydantic AI travel-agency agent and load it into kind"
+  build:mcp-travel-search:
     cmds:
-      - task: build:agency-flight-finder
-      - task: build:agency-flight-booker
-      - task: build:agency-destination
-      - task: build:agency-destination-decision
-      - task: build:agency-orchestrator
+      - docker build -t mcp-travel-search:latest {{.APP_ROOT}}/mcp-servers/travel-search-adapter
+      - kind load docker-image mcp-travel-search:latest --name {{.KIND_CLUSTER}}
 
-  build:agency-flight-finder:
+  build:mcp-bookings:
     cmds:
-      - docker build -f {{.AGENTS_ROOT}}/flight-finder/Dockerfile -t travel-agency-flight-finder:latest {{.AGENTS_ROOT}}
-      - kind load docker-image travel-agency-flight-finder:latest --name {{.KIND_CLUSTER}}
+      - docker build -t mcp-bookings:latest {{.APP_ROOT}}/mcp-servers/bookings-adapter
+      - kind load docker-image mcp-bookings:latest --name {{.KIND_CLUSTER}}
 
-  build:agency-flight-booker:
+  build:desk:
+    desc: "Build every travel-desk agent and load it into kind"
     cmds:
-      - docker build -f {{.AGENTS_ROOT}}/flight-booker/Dockerfile -t travel-agency-flight-booker:latest {{.AGENTS_ROOT}}
-      - kind load docker-image travel-agency-flight-booker:latest --name {{.KIND_CLUSTER}}
+      - task: build:desk-coordinator
+      - task: build:desk-destination-scout
+      - task: build:desk-flight-scout
+      - task: build:desk-booking-agent
+      - task: build:desk-fare-watcher
 
-  build:agency-destination:
+  build:desk-coordinator:
     cmds:
-      - docker build -f {{.AGENTS_ROOT}}/destination/Dockerfile -t travel-agency-destination:latest {{.AGENTS_ROOT}}
-      - kind load docker-image travel-agency-destination:latest --name {{.KIND_CLUSTER}}
+      - docker build -f {{.DESK_ROOT}}/coordinator/Dockerfile -t travel-desk-coordinator:latest {{.DESK_ROOT}}
+      - kind load docker-image travel-desk-coordinator:latest --name {{.KIND_CLUSTER}}
 
-  build:agency-destination-decision:
+  build:desk-destination-scout:
     cmds:
-      - docker build -f {{.AGENTS_ROOT}}/destination-decision/Dockerfile -t travel-agency-destination-decision:latest {{.AGENTS_ROOT}}
-      - kind load docker-image travel-agency-destination-decision:latest --name {{.KIND_CLUSTER}}
+      - docker build -f {{.DESK_ROOT}}/destination-scout/Dockerfile -t travel-desk-destination-scout:latest {{.DESK_ROOT}}
+      - kind load docker-image travel-desk-destination-scout:latest --name {{.KIND_CLUSTER}}
 
-  build:agency-orchestrator:
+  build:desk-flight-scout:
     cmds:
-      - docker build -f {{.AGENTS_ROOT}}/orchestrator/Dockerfile -t travel-agency-orchestrator:latest {{.AGENTS_ROOT}}
-      - kind load docker-image travel-agency-orchestrator:latest --name {{.KIND_CLUSTER}}
+      - docker build -f {{.DESK_ROOT}}/flight-scout/Dockerfile -t travel-desk-flight-scout:latest {{.DESK_ROOT}}
+      - kind load docker-image travel-desk-flight-scout:latest --name {{.KIND_CLUSTER}}
+
+  build:desk-booking-agent:
+    cmds:
+      - docker build -f {{.DESK_ROOT}}/booking-agent/Dockerfile -t travel-desk-booking-agent:latest {{.DESK_ROOT}}
+      - kind load docker-image travel-desk-booking-agent:latest --name {{.KIND_CLUSTER}}
+
+  build:desk-fare-watcher:
+    cmds:
+      - docker build -f {{.DESK_ROOT}}/fare-watcher/Dockerfile -t travel-desk-fare-watcher:latest {{.DESK_ROOT}}
+      - kind load docker-image travel-desk-fare-watcher:latest --name {{.KIND_CLUSTER}}
 
   build:llm-ingestor:
     cmds:
@@ -293,8 +280,39 @@ tasks:
           --from-literal=LITELLM_MASTER_KEY="${LITELLM_MASTER_KEY:-sk-ai-lab-litellm}" \
           --from-literal=OPENAI_API_KEY="${OPENAI_KEY:-}" \
           --from-literal=GEMINI_API_KEY="${GEMINI_KEY:-}" \
+          --from-literal=VLLM_API_KEY="${VLLM_API_KEY:-unset}" \
+          --from-literal=VLLM_BACKEND_MODEL="openai/${VLLM_MODEL:-unset}" \
+          --from-literal=VLLM_BASE_URL="$(task -d {{.TASKFILE_DIR}} inference:url 2>/dev/null || echo http://127.0.0.1:${VLLM_PORT:-8000}/v1)" \
           --dry-run=client -o yaml | kubectl apply -f -
         echo "✓ LiteLLM env secret applied to {{.NS_LITELLM}}"
+
+  inference:install:
+    desc: "Install vLLM-Metal on the Mac host (Apple Silicon) for the local-vllm alias and the examples"
+    platforms: [darwin]
+    cmds:
+      - brew tap vllm-project/vllm-metal https://github.com/vllm-project/vllm-metal
+      - brew install vllm-project/vllm-metal/vllm-metal
+
+  inference:run:
+    desc: "Serve VLLM_MODEL from .env on the Mac host (blocking; use VLLM_BIND_HOST=0.0.0.0 so kind can reach it)"
+    dir: "{{.TASKFILE_DIR}}/.."
+    cmds:
+      - bash inference/inference.sh
+
+  inference:check:
+    desc: "Check the local vLLM server answers (model list plus a generation smoke test)"
+    dir: "{{.TASKFILE_DIR}}/.."
+    cmds:
+      - bash inference/check-inference.sh
+
+  inference:url:
+    desc: "Print the vLLM URL as the kind cluster sees it (host.lima.internal via Colima)"
+    silent: true
+    dir: "{{.TASKFILE_DIR}}/.."
+    cmds:
+      - |
+        host=$(bash inference/discover-host.sh)
+        echo "http://${host}:${VLLM_PORT:-8000}/v1"
 
   # ─── Helm ─────────────────────────────────────────────────────────────────
 
@@ -436,40 +454,45 @@ tasks:
       - task: gateway-api-crds
 
   oss:manifests-apply:
-    desc: "Apply OSS gateway, LLM, direct Kafka, and travel-agency manifests"
+    desc: "Apply OSS gateway, LLM, direct Kafka, and travel-desk manifests"
     cmds:
       - kubectl apply -f {{.TASKFILE_DIR}}/oss/traefik/
       - kubectl apply -f {{.TASKFILE_DIR}}/oss/agentgateway/
       - kubectl apply -f {{.TASKFILE_DIR}}/oss/kafka/
       - kubectl apply -f {{.TASKFILE_DIR}}/oss/litellm/
-      - task: oss:agency-apply
+      - task: oss:desk-apply
       - kubectl apply -f {{.TASKFILE_DIR}}/oss/routes/
 
   eval:
-    desc: "Run the orchestrator evals (pydantic-evals) against the live lab; pass -- --no-judge to skip the LLM judge"
-    dir: "{{.AGENTS_ROOT}}/evals"
+    desc: "Run the desk evals (pydantic-evals) against the live lab; e.g. `task eval -- --suite extraction --model local-vllm`"
+    dir: "{{.DESK_ROOT}}/evals"
     cmds:
       - uv run python run_eval.py {{.CLI_ARGS}}
 
-  oss:agency-apply:
-    desc: "Apply the Pydantic AI travel-agency manifests (namespace first) and restart the agents"
+  oss:desk-apply:
+    desc: "Apply the travel-desk (namespace and Postgres first) and restart its agents"
     cmds:
-      - kubectl apply -f {{.TASKFILE_DIR}}/oss/travel-agency/namespace.yaml
+      - kubectl apply -f {{.TASKFILE_DIR}}/oss/travel-desk/namespace.yaml
       - |
         OTEL_ENDPOINT="http://otel-lgtm.otel-lgtm.svc.cluster.local:4318"
         if [ "${OBSERVABILITY_MODE:-local}" = "external" ]; then
           OTEL_ENDPOINT="${OTEL_EXTERNAL_ENDPOINT:?Set OTEL_EXTERNAL_ENDPOINT in .env when OBSERVABILITY_MODE=external}"
         fi
-        for f in {{.TASKFILE_DIR}}/oss/travel-agency/*.yaml; do
+        for f in {{.TASKFILE_DIR}}/oss/travel-desk/*.yaml; do
           sed "s#__OTEL_ENDPOINT__#${OTEL_ENDPOINT}#" "$f" | kubectl apply -f -
         done
-      - kubectl rollout restart deploy -n travel-agency
+      - kubectl rollout restart deploy -n travel-desk
+
+  desk:model:
+    desc: "Point every desk agent at another LiteLLM alias, e.g. `task desk:model -- local-vllm`"
+    cmds:
+      - kubectl set env deploy --all -n travel-desk LITELLM_MODEL={{.CLI_ARGS}}
 
   oss:manifests-delete:
-    desc: "Delete OSS gateway, LLM, direct Kafka, and travel-agency manifests"
+    desc: "Delete OSS gateway, LLM, direct Kafka, and travel-desk manifests"
     cmds:
       - kubectl delete -f {{.TASKFILE_DIR}}/oss/routes/ || true
-      - kubectl delete -f {{.TASKFILE_DIR}}/oss/travel-agency/ || true
+      - kubectl delete -f {{.TASKFILE_DIR}}/oss/travel-desk/ || true
       - kubectl delete -f {{.TASKFILE_DIR}}/oss/litellm/ || true
       - kubectl delete -f {{.TASKFILE_DIR}}/oss/kafka/ || true
       - kubectl delete -f {{.TASKFILE_DIR}}/oss/agentgateway/ || true
