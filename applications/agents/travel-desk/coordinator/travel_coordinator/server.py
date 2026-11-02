@@ -17,6 +17,7 @@ from travel_common.function_worker import make_function_a2a
 from . import workflow
 from .agents import Llm, Specialists
 from .api import a2a_handler, build_app
+from .auth import Authenticator
 from .service import DeskService
 from .settings import Agents, Policy, database_url
 from .store import Store
@@ -66,7 +67,7 @@ class _LazyService:
         return getattr(holder["service"], name)
 
 
-app = build_app(_LazyService(), lifespan)  # type: ignore[arg-type]
+app = build_app(_LazyService(), lifespan, Authenticator.from_env())  # type: ignore[arg-type]
 app.mount(PREFIX, a2a)  # last, so the explicit routes above win
 
 if __name__ == "__main__":

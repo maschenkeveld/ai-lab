@@ -61,3 +61,6 @@ dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--s
 dialog::backdrop { background: rgba(0,0,0,.4); } dialog label { display: block; margin: 10px 0; font-size: 13px; color: var(--muted); }
 dialog .row { justify-content: flex-end; margin-top: 14px; }
 @media (max-width: 860px) { main { grid-template-columns: 1fr; padding: 16px; } header { padding: 10px 16px; flex-wrap: wrap; } .who { margin-left: 0; } }
+
+.who button { padding: 4px 10px; font-size: 13px; }
+.who .badge { margin: 0 4px; }

@@ -19,7 +19,7 @@ Build and maintain a local OSS AI lab using:
 - **FastMCP**: thin Python adapters that expose Go REST APIs as MCP tools
 - **Postgres**: state for the desk (its own `desk-postgres`) and for LLM analytics
 - **Direct Kafka**: KRaft broker exposed as a LoadBalancer (no Kafka proxy layer)
-- **Keycloak**: OIDC identity provider (configured, not yet enforced on routes)
+- **Keycloak**: OIDC identity provider; signs people in to the travel desk (roles decide who may approve). Gateway routes are not yet behind it
 - **Grafana LGTM**: OTel collector, Loki, Tempo, Prometheus, Grafana in one container
 
 The point of the lab is agents that interact over open protocols (A2A, MCP, an OpenAI-compatible LLM API) through a gateway, durably and with people in the loop. Keep the agents framework-light and the protocols open.
@@ -46,6 +46,7 @@ task oss:manifests-apply      # reapply gateway/desk/LLM config (fast iteration)
 task build:desk               # rebuild only the 5 desk agent images
 task oss:desk-apply           # redeploy + restart only the desk
 task desk:model -- local-vllm # point the desk agents at another LiteLLM alias
+task keycloak:reimport        # re-import the Keycloak realm after editing it (dev only)
 task eval                     # evals against the live lab
 task hosts:apply              # update Mac /etc/hosts
 task dns:apply                # update in-cluster CoreDNS rewrites
@@ -156,7 +157,6 @@ Master key is `sk-ai-lab-litellm` (hardcoded for local demo). Change it via `tas
 
 Every agent reaches models through Pydantic AI's OpenAI-compatible model (`LITELLM_BASE_URL=http://litellm.litellm.svc.cluster.local:4000/v1`, alias from `LITELLM_MODEL`, default `openai-gpt`); `destination-scout` also uses `embedding-openai` for ranking.
 
-### The travel desk (`applications/agents/travel-desk/`)
 ### LLM through agentgateway (`k8s/oss/llm-gateway/`, optional)
 
 An alternative to LiteLLM, applied with `task llm-gateway:apply` (it creates the `llm-openai-key` and `llm-local-key` Secrets from `.env` and fills the `__VLLM_*__` placeholders; keep the file out of `k8s/oss/routes/`, which `oss:manifests-apply` applies raw). One `AgentgatewayBackend` per model with `spec.ai.provider.openai.model` forcing the upstream model (the alias mechanism: routing is by URL, not by the body's `model`), `spec.policies.auth.secretRef` holding the key, and `spec.policies.ai.routes` mapping path suffixes to route types (`Completions`, `Embeddings`, `Models`, ...); an `HTTPRoute` per backend rewrites `/llm/<name>` to `/`. `spec.policies.ai.promptGuard.request` holds the guardrails (regex `Reject` / `Mask`, built-ins `CreditCard`, `Ssn`, `Email`). Switch the desk with `task desk:llm -- gateway | gateway-local | litellm` (it sets `LITELLM_BASE_URL`; `task oss:desk-apply` resets it to LiteLLM). The guard also blocks hostile inputs in the evals (the extraction suite's `prompt-injection` case returns a 403 through the gateway).
@@ -165,6 +165,7 @@ An alternative to LiteLLM, applied with `task llm-gateway:apply` (it creates the
 
 agentregistry v0.4.0 (a catalog, not a gateway), installed with `task agentregistry:install` (pinned chart, `rbac.watchedNamespaces={agentregistry}` so its write access stays in its namespace; the default is a cluster-wide ClusterRole with write on Secrets). `catalog.yaml` is a multi-document `ar.dev/v1alpha1` stream applied with `POST /v0/apply` (`task agentregistry:apply`): `MCPServer` with `spec.remote.{type: streamable-http, url}` pointing at the gateway routes, and `Agent` with `spec.source.{image, protocol: A2A}`, `modelProvider/modelName`, `mcpServers` references and the A2A card URL in an annotation. When adding an MCP server or agent to the desk, add it to the catalog too. Quote descriptions in the YAML (a `": "` inside breaks it). The API is described at `/openapi.json`; resources are `agents`, `mcpservers`, `models`, `skills`, `prompts`, `plugins`, `deployments`, `runtimes`. Do not use its deploy features without kagent, which this lab does not run.
 
+### The travel desk (`applications/agents/travel-desk/`)
 
 Each project is a uv project (`pyproject.toml` + `uv.lock`) with an editable path dependency on `common/` (package `travel_common`). Docker build context is `applications/agents/travel-desk`; images are `travel-desk-<name>`. Unit tests: `cd applications/agents/travel-desk/<project> && uv run pytest` (the coordinator's and fare-watcher's tests start a Postgres in Docker; they skip without it).
 
@@ -183,6 +184,10 @@ Each project is a uv project (`pyproject.toml` + `uv.lock`) with an editable pat
 - *The audit log is append-only* (a trigger rejects UPDATE/DELETE). Add events with `Store.audit`; never try to edit history.
 - *The vocabulary lives in the contract.* `TripRequirements` filters vibes, activities and budget to what the REST services accept; keep it that way when adding fields a model fills in.
 - *One workflow engine per database*: the coordinator and fare-watcher run one replica with the `Recreate` strategy.
+
+**Identity (Keycloak).** `auth.py` verifies every REST call's Bearer token (RS256 only, signature from the realm's JWKS, `iss`, `exp`, `azp` in `OIDC_CLIENTS`) and builds a `User(username, roles)`; identity comes from the token and **never** from a request body (the body's `requested_by`/`approver`/`actor` are only read when `AUTH_REQUIRED=false`). Roles `desk-requester` and `desk-approver` (env `ROLE_REQUESTER`, `ROLE_APPROVER`) gate the endpoints in `api.py`: requesters see only their own trips, approvers see all and decide. `DeskService.decide` refuses a decision by the requester of the trip (`Forbidden`, 403, recorded as `approval_refused`; `ALLOW_SELF_APPROVAL=true` turns that off). The A2A endpoint is deliberately outside this. Tests: `tests/test_auth.py` (real RSA-signed tokens, forgery, `alg: none`, algorithm confusion, roles, visibility) and `tests/test_spa_sha256.py` (the web app's PKCE hash against Node). The web app signs in with `static/auth.js` (authorization code + PKCE, no libraries); it must keep working on plain http, which has no `crypto.subtle`, hence the fallback hash.
+
+**The realm** is `applications/keycloak/realm-export-ai-lab.json` (source of truth): roles `desk-requester` and `desk-approver`, users `alice` (requester), `bob` and `carol` (approvers), `dave` (both), password `demo`, and public clients `travel-desk-web` (code + PKCE, redirect `http://agentgateway.lab/desk/*`, web origin `http://agentgateway.lab`) and `travel-desk-cli` (password grant, sandbox only). Both carry mappers for `preferred_username` and `realm_access.roles`. Keycloak imports only at startup: after editing the file run `task keycloak:reimport` (dev only, deletes the realm). Add a user or role there, not by clicking in the admin console, or a re-import loses it.
 
 **Policy and timings** are environment variables on the coordinator (`k8s/oss/travel-desk/coordinator.yaml`): `AUTO_APPROVE_BELOW_EUR` (60), `SECOND_APPROVER_FROM_EUR` (180), `APPROVAL_TTL_SECONDS` (900), `ESCALATE_AFTER_SECONDS` (300), `MONITOR_SECONDS` (1800), `DEMO_MODE` (enables "simulate a fare drop"). The watcher checks every 30s, and flags a drop of at least 8% and 10 EUR.
 
@@ -307,3 +312,4 @@ kubectl create job --from=cronjob/llm-analyzer trigger-$(date +%s) -n llm-analyt
 - Do not hardcode LoadBalancer IPs; use `.lab` hostnames.
 - Do not create a `deck/` directory or any Kong-specific subdirectory.
 - Do not let a model decide approvals, prices or IDs; code owns those.
+- Do not take identity from a request body when authentication is on; the token says who is acting.

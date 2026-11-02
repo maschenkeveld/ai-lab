@@ -67,6 +67,10 @@ class DecisionConflict(Exception):
     """The decision cannot be applied (approval already resolved, same approver twice, ...)."""
 
 
+class Forbidden(Exception):
+    """The caller is known but not allowed to do this (not an approver, deciding on their own trip, ...)."""
+
+
 class NotFound(Exception):
     pass
 

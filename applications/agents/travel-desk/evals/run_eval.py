@@ -16,7 +16,6 @@ import asyncio
 import os
 import sys
 import time
-import uuid
 from typing import Any
 
 os.environ.setdefault("LITELLM_BASE_URL", "http://litellm.lab/v1")
@@ -74,24 +73,43 @@ async def extract(text: str) -> dict[str, Any]:
     return (await Llm().extract(text)).model_dump()
 
 
+PASSWORD = os.getenv("DESK_PASSWORD", "demo")  # the sandbox password of the demo users
+
+
 class DeskClient:
+    """The desk's REST API as a given demo user. With Keycloak on, each user signs in and the server decides what they may do."""
+
     def __init__(self) -> None:
         self.http = httpx.AsyncClient(base_url=f"{DESK}/api", timeout=60)
+        self._tokens: dict[str, str] = {}
+        self._auth: dict | None = None
 
-    async def get(self, path: str) -> Any:
-        r = await self.http.get(path)
+    async def _headers(self, user: str) -> dict:
+        if self._auth is None:
+            self._auth = (await self.http.get("config")).json()["auth"]
+        if not self._auth["enabled"]:
+            return {}
+        if user not in self._tokens:
+            r = await self.http.post(self._auth["token_endpoint"], data={"grant_type": "password", "client_id": "travel-desk-cli",
+                                                                         "username": user, "password": PASSWORD})
+            r.raise_for_status()
+            self._tokens[user] = r.json()["access_token"]
+        return {"Authorization": f"Bearer {self._tokens[user]}"}
+
+    async def get(self, path: str, user: str = "alice") -> Any:
+        r = await self.http.get(path, headers=await self._headers(user))
         r.raise_for_status()
         return r.json()
 
-    async def post(self, path: str, body: dict) -> Any:
-        r = await self.http.post(path, json=body)
+    async def post(self, path: str, body: dict, user: str = "alice") -> Any:
+        r = await self.http.post(path, json=body, headers=await self._headers(user))
         r.raise_for_status()
         return r.json()
 
     async def until(self, trip_id: str, *statuses: str, timeout: float = 240) -> dict:
         deadline = time.time() + timeout
         while time.time() < deadline:
-            snap = await self.get(f"trips/{trip_id}")
+            snap = await self.get(f"trips/{trip_id}", "alice")
             if snap["trip"]["status"] in statuses:
                 return snap
             await asyncio.sleep(1.5)
@@ -100,24 +118,24 @@ class DeskClient:
 
 async def run_trip(text: str, decision: str) -> dict[str, Any]:
     desk = DeskClient()
-    config = await desk.get("config")
+    config = await desk.get("config", "alice")
     rules = config["policy"]["rules"]
     policy = {"below": rules[0]["price_below_eur"], "second": rules[2]["price_from_eur"]}
-    trip = await desk.post("trips", {"request": text, "requested_by": f"eval-{uuid.uuid4().hex[:4]}"})
+    trip = await desk.post("trips", {"request": text}, "alice")  # alice requests; bob and carol (approvers) decide
     snap = await desk.until(trip["id"], "awaiting_approval", "booked", "failed")
     if snap["trip"]["status"] == "awaiting_approval":
         approval = next(a for a in snap["approvals"] if a["status"] == "pending")
-        who = ["eval-bob", "eval-carol"]
+        who = ["bob", "carol"]
         if decision == "reject":
-            await desk.post(f"approvals/{approval['id']}/decision", {"approver": who[0], "decision": "reject", "comment": "eval"})
+            await desk.post(f"approvals/{approval['id']}/decision", {"decision": "reject", "comment": "eval"}, who[0])
         else:
             for name in who[: approval["required"]]:
-                await desk.post(f"approvals/{approval['id']}/decision", {"approver": name, "decision": "approve", "comment": "eval"})
+                await desk.post(f"approvals/{approval['id']}/decision", {"decision": "approve", "comment": "eval"}, name)
         snap = await desk.until(trip["id"], "booked", "rejected", "failed")
     await asyncio.sleep(1)
     snap = await desk.get(f"trips/{trip['id']}")
     if snap["trip"]["status"] in ("booked", "rebooking"):
-        await desk.post(f"trips/{trip['id']}/cancel", {"actor": "eval"})  # stop its fare watch
+        await desk.post(f"trips/{trip['id']}/cancel", {}, "alice")  # stop its fare watch
         snap["trip"] = {**snap["trip"], "status": "booked"}  # judge the outcome the decision produced, not the cleanup
     return {**snap, "decision": decision, "policy": policy}
 

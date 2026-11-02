@@ -10,9 +10,7 @@
   <header>
     <div class="brand"><span class="logo">✈</span> Travel desk <small>human-in-the-loop booking</small></div>
     <div id="pending-badge" class="pill hidden"></div>
-    <label class="who">Approving as
-      <input id="approver" placeholder="your name" maxlength="40" autocomplete="off">
-    </label>
+    <div class="who" id="who"></div>
   </header>
 
   <main>
@@ -45,6 +43,7 @@
     </form>
   </dialog>
 
+  <script src="static/auth.js"></script>
   <script src="static/app.js"></script>
 </body>
 </html>

@@ -87,4 +87,6 @@ class AuditTrailComplete(Evaluator[str, dict[str, Any], Any]):
         if not all(k in kinds for k in needed) or kinds.index("trip_requested") != 0:
             return False
         human = [e for e in audit if e["type"].startswith("approval_") and e["type"] not in ("approval_requested", "approval_escalated", "approval_expired")]
-        return all(e["actor"] not in ("system", "") for e in human)
+        # every human decision names a real person (from their token), and never the person who requested the trip
+        requester = ctx.output["trip"]["requested_by"]
+        return all(e["actor"] not in ("system", "", requester) for e in human)

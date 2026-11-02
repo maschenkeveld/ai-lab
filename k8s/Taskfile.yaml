@@ -271,6 +271,17 @@ tasks:
           --dry-run=client -o yaml | kubectl apply -f -
         echo "✓ keycloak-realm Secret applied to {{.NS_KEYCLOAK}}"
 
+  keycloak:reimport:
+    desc: "Re-import applications/keycloak/realm-export-ai-lab.json into the running Keycloak (dev only: deletes the ai-lab realm, restarts Keycloak)"
+    cmds:
+      - task: secrets:keycloak-realm
+      - |
+        TOKEN=$(curl -sf http://keycloak.lab:8080/realms/master/protocol/openid-connect/token \
+          -d grant_type=password -d client_id=admin-cli -d username=admin -d password=admin | jq -r .access_token)
+        curl -s -o /dev/null -w "delete realm: %{http_code}\n" -X DELETE -H "Authorization: Bearer $TOKEN" http://keycloak.lab:8080/admin/realms/ai-lab
+        kubectl -n {{.NS_KEYCLOAK}} rollout restart statefulset/keycloak
+        kubectl -n {{.NS_KEYCLOAK}} rollout status statefulset/keycloak --timeout=300s
+
   secrets:litellm:
     desc: "Create LiteLLM secrets from .env for the OSS LLM gateway"
     cmds:
@@ -483,17 +494,6 @@ tasks:
         done
       - kubectl rollout restart deploy -n travel-desk
 
-  desk:model:
-    desc: "Point every desk agent at another LiteLLM alias, e.g. `task desk:model -- local-vllm`"
-    cmds:
-      - kubectl set env deploy --all -n travel-desk LITELLM_MODEL={{.CLI_ARGS}}
-
-  oss:manifests-delete:
-    desc: "Delete OSS gateway, LLM, direct Kafka, and travel-desk manifests"
-    cmds:
-      - kubectl delete -f {{.TASKFILE_DIR}}/oss/routes/ || true
-      - kubectl delete -f {{.TASKFILE_DIR}}/oss/travel-desk/ || true
-      - kubectl delete -f {{.TASKFILE_DIR}}/oss/litellm/ || true
   llm-gateway:apply:
     desc: "Route LLM traffic through agentgateway too (an alternative to LiteLLM): secrets, backends and routes"
     cmds:
@@ -540,6 +540,17 @@ tasks:
         esac
         kubectl set env deploy --all -n travel-desk LITELLM_BASE_URL="$URL"
 
+  desk:model:
+    desc: "Point every desk agent at another LiteLLM alias, e.g. `task desk:model -- local-vllm`"
+    cmds:
+      - kubectl set env deploy --all -n travel-desk LITELLM_MODEL={{.CLI_ARGS}}
+
+  oss:manifests-delete:
+    desc: "Delete OSS gateway, LLM, direct Kafka, and travel-desk manifests"
+    cmds:
+      - kubectl delete -f {{.TASKFILE_DIR}}/oss/routes/ || true
+      - kubectl delete -f {{.TASKFILE_DIR}}/oss/travel-desk/ || true
+      - kubectl delete -f {{.TASKFILE_DIR}}/oss/litellm/ || true
       - kubectl delete -f {{.TASKFILE_DIR}}/oss/kafka/ || true
       - kubectl delete -f {{.TASKFILE_DIR}}/oss/agentgateway/ || true
       - kubectl delete -f {{.TASKFILE_DIR}}/oss/traefik/ || true

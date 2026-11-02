@@ -23,4 +23,5 @@ def describe(policy: Policy) -> dict:
         "approval_ttl_seconds": policy.approval_ttl_seconds,
         "escalate_after_seconds": policy.escalate_after_seconds,
         "max_edits": policy.max_edits,
+        "self_approval_allowed": policy.allow_self_approval,
     }

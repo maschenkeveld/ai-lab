@@ -5,7 +5,7 @@ from typing import Any
 from dbos import DBOS, SetWorkflowID
 from travel_common.contracts import BookingCommand, FareEvent, WatchRequest
 
-from .store import TERMINAL_TRIP, DecisionConflict, NotFound, new_id
+from .store import TERMINAL_TRIP, DecisionConflict, Forbidden, NotFound, new_id
 from .workflow import Deps, trip_workflow
 
 log = logging.getLogger(__name__)
@@ -56,6 +56,12 @@ class DeskService:
 
     async def decide(self, approval_id: str, approver: str, decision: str, comment: str = "",
                      edit: dict[str, Any] | None = None) -> dict:
+        approval = await self.store.get_approval(approval_id)
+        trip = await self.store.get_trip(approval["trip_id"])
+        if not self.deps.policy.allow_self_approval and trip["requested_by"].strip().lower() == approver.strip().lower():
+            await self.store.audit(approver, "approval_refused", trip_id=trip["id"], approval_id=approval_id,
+                                   reason="self_approval", attempted=decision)
+            raise Forbidden("you cannot decide on a trip you requested")
         approval, message = await self.store.decide(approval_id, approver, decision, comment, edit)
         if message is not None:
             await DBOS.send_async(approval["trip_id"], message, topic=f"approval:{approval_id}")

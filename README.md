@@ -138,9 +138,26 @@ An approver can **approve**, **reject**, or **edit** (pick another destination o
 - *Approvals are rows, not pauses.* Who may approve, how many are needed, when it expires, every decision, all in Postgres. Concurrent decisions resolve exactly once.
 - *The audit log is append-only.* A database trigger rejects any UPDATE or DELETE.
 
+**Who is acting: Keycloak.** The desk signs people in with Keycloak (realm `ai-lab`, `keycloak.lab:8080`). The coordinator verifies every API call's access token (signature against the realm's published keys, issuer, expiry, and that it was issued to a desk client) and takes the caller's identity from the token, never from the request body. Two realm roles decide what a person may do:
+
+| Role | May |
+|---|---|
+| `desk-requester` | ask for trips, and see and cancel their own |
+| `desk-approver` | see every trip and the approval queue; approve, reject or edit bookings |
+
+Rules the server enforces: you cannot decide on a trip you requested (the refusal is recorded in the audit log), the same person cannot approve twice, and the audit log names the person from their token. Demo users, all with the sandbox password `demo`:
+
+| User | Roles |
+|---|---|
+| `alice` | `desk-requester` |
+| `bob`, `carol` | `desk-approver` |
+| `dave` | both (and so is the user who shows that you cannot approve your own trip) |
+
+The realm lives in `applications/keycloak/realm-export-ai-lab.json` (roles, users, and two public clients: `travel-desk-web` for the browser with the authorization-code flow and PKCE, and `travel-desk-cli` with the password grant for the terminal, a sandbox convenience). Keycloak only imports it at startup, so after changing it run `cd k8s && task keycloak:reimport` (dev only: it deletes the realm and restarts Keycloak). `AUTH_REQUIRED=false` on the coordinator turns verification off (callers name themselves, as before); the cluster runs with it on.
+
 **Using it.**
-- **Web app:** `http://agentgateway.lab/desk/`. Plan a trip, watch it research, work the approval queue, and (in demo mode) press "Simulate a fare drop". Type your name at the top right; that is who you approve as. A second approver must be a different name.
-- **Terminal:** `applications/agents/travel-desk/desk_cli.py` does the same over the REST API, and `./desk_cli.py demo` runs a scripted end-to-end flow.
+- **Web app:** `http://agentgateway.lab/desk/`. It sends you to Keycloak to sign in (try `alice` to request and `bob` or `carol` to approve; use a private window to be two people at once). Plan a trip, watch it research, work the approval queue, and (in demo mode) press "Simulate a fare drop".
+- **Terminal:** `applications/agents/travel-desk/desk_cli.py` does the same over the REST API, as the user you name with `--as` (`./desk_cli.py new "..." --as alice`, `./desk_cli.py approve <id> --as bob`; it signs in with the sandbox password and caches the token), and `./desk_cli.py demo` runs a scripted end-to-end flow with several people.
 - **Over A2A:** other agents create trips and report fare events with typed messages (`create_trip`, `fare_event`, `get_trip`) to `/a2a/trip-coordinator`.
 
 Each agent serves an agent card at `/a2a/<name>/.well-known/agent-card.json` and A2A JSON-RPC at `/a2a/<name>/`. `message/send` is asynchronous: it returns a task and the caller polls `tasks/get`.
@@ -166,6 +183,21 @@ Three Go REST servers, originally shared with the Kong AI Lab. This lab extends 
 
 OTEL env vars are configured on all three; the Go OTEL SDK is wired in the application code.
 
+### Agent registry (optional)
+
+[agentregistry](https://github.com/agentregistry-dev/agentregistry) is an open-source catalog for MCP servers, agents, skills and prompts. It is a catalog and lifecycle tool, not a gateway: agentgateway routes the traffic, the registry records what exists, what it does and what depends on what. Here it holds the travel desk's two MCP servers and five agents.
+
+```bash
+cd k8s
+task agentregistry:install     # helm chart v0.4.0, namespace agentregistry; writes limited to that namespace
+task agentregistry:apply       # register the desk's MCP servers and agents (k8s/oss/agentregistry/catalog.yaml)
+task agentregistry:ui          # then open http://localhost:12121
+```
+
+What the catalog records: each MCP server as a remote streamable-HTTP endpoint behind agentgateway (`http://agentgateway.lab/mcp-travel-search`), and each agent with its A2A protocol, image, model, the MCP servers it uses (so `flight-scout → mcp-travel-search` is a reference you can query) and its A2A agent card URL as an annotation. The REST API is under `/v0` (`/v0/agents`, `/v0/mcpservers`, `POST /v0/apply` for YAML), and `http://localhost:12121/openapi.json` describes it.
+
+Notes from trying it: the chart's default RBAC is a cluster-wide ClusterRole that can write Deployments, Services, Secrets and ConfigMaps everywhere (it deploys things for you via kagent); `task agentregistry:install` scopes that with `rbac.watchedNamespaces`, which is enough for catalog use. The bundled Postgres is documented as dev-only. The catalog survived restarts of both pods here (it has a volume) but is gone if you recreate the cluster, so re-run `task agentregistry:apply`. The registry's own deploy feature (it found a default Kubernetes runtime) needs kagent and was not tried. The web UI was not checked in a browser.
+
 ### Standalone examples
 
 `agentic-examples/` holds small runnable examples of one idea each, for trying Pydantic AI and the agent protocols by hand and then
@@ -183,21 +215,6 @@ cd k8s
 task inference:install     # once: vLLM-Metal via Homebrew (Apple Silicon)
 task inference:run         # blocking terminal: serves VLLM_MODEL from .env
 task inference:check       # model list plus a generation smoke test
-### Agent registry (optional)
-
-[agentregistry](https://github.com/agentregistry-dev/agentregistry) is an open-source catalog for MCP servers, agents, skills and prompts. It is a catalog and lifecycle tool, not a gateway: agentgateway routes the traffic, the registry records what exists, what it does and what depends on what. Here it holds the travel desk's two MCP servers and five agents.
-
-```bash
-cd k8s
-task agentregistry:install     # helm chart v0.4.0, namespace agentregistry; writes limited to that namespace
-task agentregistry:apply       # register the desk's MCP servers and agents (k8s/oss/agentregistry/catalog.yaml)
-task agentregistry:ui          # then open http://localhost:12121
-```
-
-What the catalog records: each MCP server as a remote streamable-HTTP endpoint behind agentgateway (`http://agentgateway.lab/mcp-travel-search`), and each agent with its A2A protocol, image, model, the MCP servers it uses (so `flight-scout → mcp-travel-search` is a reference you can query) and its A2A agent card URL as an annotation. The REST API is under `/v0` (`/v0/agents`, `/v0/mcpservers`, `POST /v0/apply` for YAML), and `http://localhost:12121/openapi.json` describes it.
-
-Notes from trying it: the chart's default RBAC is a cluster-wide ClusterRole that can write Deployments, Services, Secrets and ConfigMaps everywhere (it deploys things for you via kagent); `task agentregistry:install` scopes that with `rbac.watchedNamespaces`, which is enough for catalog use. The bundled Postgres is documented as dev-only. The catalog survived restarts of both pods here (it has a volume) but is gone if you recreate the cluster, so re-run `task agentregistry:apply`. The registry's own deploy feature (it found a default Kubernetes runtime) needs kagent and was not tried. The web UI was not checked in a browser.
-
 task secrets:litellm && kubectl -n litellm rollout restart deploy/litellm   # load the URL and key into LiteLLM
 task desk:model -- local-vllm    # point every desk agent at it (back: task desk:model -- openai-gpt)
 ```
@@ -249,8 +266,11 @@ All cluster operations are driven by `task` from the `k8s/` directory.
 | `task oss:manifests-apply` | Applies Traefik routes, LiteLLM, agentgateway backends and the travel desk |
 | `task build:desk` / `task oss:desk-apply` | Rebuild the 5 desk agents / redeploy and restart them |
 | `task desk:model -- <alias>` | Point every desk agent at another LiteLLM alias |
+| `task llm-gateway:apply` / `task desk:llm -- gateway` | Optional LLM path through agentgateway, and switching the desk to it |
+| `task agentregistry:install` / `:apply` / `:ui` | Optional agent and MCP catalog (agentregistry) |
 | `task eval` | Run the desk evals against the live lab (`-- --suite extraction` for the model-only suite) |
 | `task inference:install/run/check` | Local vLLM on the Mac (see [Local inference](#local-inference)) |
+| `task keycloak:reimport` | Re-import the Keycloak realm after editing `realm-export-ai-lab.json` (dev only) |
 | `task doctor` | Preflight: tools, Colima network address, `.env` keys |
 | `task hosts:apply` | Writes `.lab` hostnames to Mac `/etc/hosts` |
 | `task dns:apply` | Patches CoreDNS rewrites for in-cluster `.lab` resolution |
@@ -266,8 +286,6 @@ All cluster operations are driven by `task` from the `k8s/` directory.
 
 ---
 
-| `task llm-gateway:apply` / `task desk:llm -- gateway` | Optional LLM path through agentgateway, and switching the desk to it |
-| `task agentregistry:install` / `:apply` / `:ui` | Optional agent and MCP catalog (agentregistry) |
 ## Repository structure
 
 ```
@@ -305,6 +323,8 @@ All cluster operations are driven by `task` from the `k8s/` directory.
 │       ├── agentgateway/                 # Gateway CRD (agentgateway-proxy)
 │       ├── kafka/                        # Direct external Kafka listener
 │       ├── litellm/                      # LiteLLM Deployment, ConfigMap, Service
+│       ├── llm-gateway/                  # optional: LLM backends and routes through agentgateway
+│       ├── agentregistry/                # optional: the desk's catalog for agentregistry
 │       ├── routes/                       # HTTPRoutes (rest-apis, travel-desk, mcp-servers, litellm)
 │       ├── travel-desk/                  # Desk Deployments, Services, and its Postgres
 │       └── traefik/                      # Traefik Gateway CRD
@@ -323,8 +343,6 @@ All cluster operations are driven by `task` from the `k8s/` directory.
 | [Colima](https://github.com/abiosoft/colima) | macOS Docker runtime — `--network-address` required |
 | [Kind](https://kind.sigs.k8s.io/) | Kubernetes in Docker |
 | [kubectl](https://kubernetes.io/docs/tasks/tools/) | |
-│       ├── llm-gateway/                  # optional: LLM backends and routes through agentgateway
-│       ├── agentregistry/                # optional: the desk's catalog for agentregistry
 | [Helm](https://helm.sh/) | |
 | [Task](https://taskfile.dev/) | |
 | [uv](https://docs.astral.sh/uv/) | Only to run the tests, evals and examples locally |
@@ -486,7 +504,7 @@ The agents are instrumented with Starlette, httpx and Pydantic AI (`Agent.instru
 | Agent framework | Pydantic AI (Python, MIT) | TypeScript agents | Different runtimes. Pydantic AI is model-agnostic and runs against LiteLLM here |
 | A2A agents | FastA2A servers, routed by agentgateway | A2A routed through Kong | Both speak the open A2A protocol |
 | Long-running agents | DBOS workflows on Postgres | n/a | Durable approvals, fare watching, restart-safe |
-| Auth enforcement | Keycloak present, routes unauthenticated | Keycloak + OIDC on every route | Significant gap: Kong enforces auth at the gateway layer |
+| Auth enforcement | Keycloak signs people in to the travel desk (OIDC, roles, no self-approval); gateway routes (MCP, A2A, LLM) are still unauthenticated | Keycloak + OIDC on every route | Gap: Kong enforces auth at the gateway layer; here it is enforced by the application, only for the desk's REST API |
 | Observability | REST servers, MCP adapters and the agents all OTEL-wired (traces+logs+metrics); LiteLLM/agentgateway logs-only | All components fully wired (OTEL traces + logs + metrics) | LiteLLM/agentgateway still a gap |
 | LLM Analytics | Full pipeline (Kafka → Postgres → React) | Same | Parity |
 | MCP adapters | Python FastMCP (explicit adapter per API) | Kong ai-mcp-proxy (auto-converts REST) | Kong approach is zero-code |
@@ -497,7 +515,8 @@ The agents are instrumented with Starlette, httpx and Pydantic AI (`Agent.instru
 
 ## Known gaps
 
-- **Approver identity is a typed name.** The web app and REST API trust the name you give; there is no login. Keycloak is deployed but not wired in, so "who approved" is an honour system and a second approver only has to be a different string.
+- **Sign-in is sandbox-grade.** Demo users share the password `demo`; the terminal client uses the password grant; the web app is served over plain http (so it carries its own SHA-256 for PKCE) and keeps tokens in `sessionStorage`. Keycloak runs in dev mode with `admin/admin`.
+- **The A2A endpoints are not behind sign-in.** The user-facing REST API is; agent-to-agent traffic (including the fare-watcher's `fare_event` to the coordinator) is open, like the rest of agentgateway. A route-level JWT policy would be the next step.
 - agentgateway routes are open: no auth, no scope enforcement on MCP or A2A endpoints.
 - An agent keeps its MCP session open, so if an MCP server pod is replaced, restart the agents that use it (`kubectl rollout restart deploy -n travel-desk`) or their tool calls return 404.
 - The coordinator and fare-watcher each run a single replica (Recreate strategy): one workflow engine per database.

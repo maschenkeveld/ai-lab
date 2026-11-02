@@ -17,6 +17,7 @@ class Policy:
     hold_buffer_seconds: float = field(default_factory=lambda: _f("HOLD_BUFFER_SECONDS", 300))
     max_edits: int = field(default_factory=lambda: int(_f("MAX_EDITS", 3)))
     monitor_seconds: float = field(default_factory=lambda: _f("MONITOR_SECONDS", 900))
+    allow_self_approval: bool = field(default_factory=lambda: os.getenv("ALLOW_SELF_APPROVAL", "false").lower() == "true")
 
 
 def database_url() -> str:

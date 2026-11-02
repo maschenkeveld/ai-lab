@@ -166,7 +166,7 @@ curl -s -X POST http://agentgateway.lab/a2a/booking-agent/ -H "Content-Type: app
 
 ### 6. The travel desk (end to end)
 
-Needs a working LLM. Use the CLI (`applications/agents/travel-desk/desk_cli.py`), which drives the same REST API as the web app.
+Needs a working LLM and Keycloak. Use the CLI (`applications/agents/travel-desk/desk_cli.py`), which drives the same REST API as the web app. `--as <user>` signs in as that demo user (password `demo`): `alice` requests, `bob` and `carol` approve, `dave` is both.
 
 **6a. Plan, approve, booked.**
 
@@ -174,19 +174,19 @@ Needs a working LLM. Use the CLI (`applications/agents/travel-desk/desk_cli.py`)
 cd applications/agents/travel-desk
 T=$(./desk_cli.py new "A culture weekend from Amsterdam around 18 December, mid budget, museums please." --as alice | cut -d' ' -f1)
 # poll until the trip stops researching
-until ./desk_cli.py trips | grep "$T" | grep -qE "awaiting_approval|booked|failed"; do sleep 3; done
-./desk_cli.py show $T                       # → a proposal, booking code in state (held), an approval (or already booked if under the auto-approve price)
-./desk_cli.py inbox                         # → lists the approval for $T when one is needed
+until ./desk_cli.py trips --as alice | grep "$T" | grep -qE "awaiting_approval|booked|failed"; do sleep 3; done
+./desk_cli.py show $T --as alice                       # → a proposal, booking code in state (held), an approval (or already booked if under the auto-approve price)
+./desk_cli.py inbox --as bob                         # → lists the approval for $T when one is needed
 ```
 
 If the trip is awaiting approval: approve as the number of *different* people it needs (`approval ... N/N approvals` in `show`):
 
 ```bash
-A=$(./desk_cli.py inbox | grep "trip $T" | awk '{print $1}')
+A=$(./desk_cli.py inbox --as bob | grep "trip $T" | awk '{print $1}')
 ./desk_cli.py approve $A --as bob --comment "test"
-./desk_cli.py approve $A --as Bob            # → 409 "Bob has already decided on this approval" (same person, any case)
+./desk_cli.py approve $A --as Bob            # → 409 "bob has already decided on this approval" (same person, any capitalisation)
 ./desk_cli.py approve $A --as carol          # only if it needs two approvals
-sleep 8; ./desk_cli.py show $T | head -5     # → [booked], booking ... (scheduled)
+sleep 8; ./desk_cli.py show $T --as alice | head -5     # → [booked], booking ... (scheduled)
 ```
 
 Expected: status `booked`, the booking `scheduled`, and the audit trail shows `trip_requested`, `requirements_extracted`, `research_done`, `booking_hold`, `approval_requested`, `approval_approve`, `booking_confirm`, `status_booked` in that order.
@@ -195,20 +195,20 @@ Expected: status `booked`, the booking `scheduled`, and the audit trail shows `t
 
 ```bash
 T=$(./desk_cli.py new "A food and city break from Amsterdam around 19 December, mid budget." --as alice | cut -d' ' -f1)
-until ./desk_cli.py inbox | grep -q "trip $T"; do sleep 3; done      # (if it auto-approves instead, repeat with another request)
-A=$(./desk_cli.py inbox | grep "trip $T" | awk '{print $1}')
+until ./desk_cli.py inbox --as bob | grep -q "trip $T"; do sleep 3; done      # (if it auto-approves instead, repeat with another request)
+A=$(./desk_cli.py inbox --as bob | grep "trip $T" | awk '{print $1}')
 ./desk_cli.py reject $A --as bob --comment "too pricey"
-sleep 5; ./desk_cli.py show $T | head -6      # → [rejected]; the booking is (cancelled)
+sleep 5; ./desk_cli.py show $T --as alice | head -6      # → [rejected]; the booking is (cancelled)
 ```
 
 **6c. Durability: kill the coordinator mid-approval.**
 
 ```bash
 T=$(./desk_cli.py new "A culture weekend from Amsterdam around 18 December, mid budget." --as alice | cut -d' ' -f1)
-until ./desk_cli.py inbox | grep -q "trip $T"; do sleep 3; done
+until ./desk_cli.py inbox --as bob | grep -q "trip $T"; do sleep 3; done
 kubectl -n travel-desk delete pod -l app=coordinator
 kubectl -n travel-desk rollout status deploy/coordinator --timeout=120s; sleep 8
-./desk_cli.py inbox | grep "trip $T"          # → the approval is still pending after the restart
+./desk_cli.py inbox --as bob | grep "trip $T"          # → the approval is still pending after the restart
 ```
 
 Then approve it as in 6a and confirm the trip is `booked`.
@@ -216,15 +216,15 @@ Then approve it as in 6a and confirm the trip is `booked`.
 **6d. Fare drop and rebooking.** On a booked trip (from 6a):
 
 ```bash
-./desk_cli.py drop $T --pct -30               # demo mode: pushes the booked route's fare down 30%
+./desk_cli.py drop $T --pct -30 --as bob               # demo mode: pushes the booked route's fare down 30%
 # the fare-watcher checks every 30s; wait up to ~90s for the rebook approval
-until ./desk_cli.py inbox | grep "trip $T" | grep -q rebook; do sleep 5; done
-A=$(./desk_cli.py inbox | grep "trip $T" | awk '{print $1}')
+until ./desk_cli.py inbox --as bob | grep "trip $T" | grep -q rebook; do sleep 5; done
+A=$(./desk_cli.py inbox --as bob | grep "trip $T" | awk '{print $1}')
 ./desk_cli.py approve $A --as bob; (./desk_cli.py approve $A --as carol 2>/dev/null || true)
-sleep 8; ./desk_cli.py show $T | grep -E "booking_(hold|confirm|cancel)|Rebooked"
+sleep 8; ./desk_cli.py show $T --as alice | grep -E "booking_(hold|confirm|cancel)|Rebooked"
 ```
 
-Expected: the audit shows, in order, a hold of the new booking, its confirmation, then the cancellation of the old one; the trip's summary says `Rebooked to <code>, saving <amount>`. Clean up with `./desk_cli.py cancel $T`.
+Expected: the audit shows, in order, a hold of the new booking, its confirmation, then the cancellation of the old one; the trip's summary says `Rebooked to <code>, saving <amount>`. Clean up with `./desk_cli.py cancel $T --as alice`.
 
 **6e. The audit log is append-only.**
 
@@ -245,6 +245,34 @@ curl -s http://localhost:12121/v0/mcpservers | jq -r '[.items[].metadata.name] |
 curl -s http://localhost:12121/v0/agents/flight-scout | jq -r '.spec.mcpServers[0].name'          # → mcp-travel-search
 kill %1
 ```
+
+**6g. Identity and roles (Keycloak).**
+
+```bash
+cd applications/agents/travel-desk
+D=http://agentgateway.lab/desk/api
+tok(){ curl -s http://keycloak.lab:8080/realms/ai-lab/protocol/openid-connect/token -d grant_type=password -d client_id=travel-desk-cli -d username=$1 -d password=demo | jq -r .access_token; }
+curl -s -o /dev/null -w "%{http_code}\n" $D/trips                                              # → 401 (no token)
+curl -s -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer abc.def.ghi" $D/trips      # → 401 (a forged token)
+curl -s $D/config | jq -r .auth.enabled                                                        # → true (public: the web app needs it to sign in)
+./desk_cli.py whoami --as alice                  # → alice  roles: desk-requester  approver: False
+./desk_cli.py whoami --as bob                    # → bob  roles: desk-approver  approver: True
+./desk_cli.py inbox --as alice                   # → 403 ... this needs the 'desk-approver' role
+
+# the name in a request body is ignored: the token says who is acting
+curl -s -X POST $D/trips -H "Authorization: Bearer $(tok alice)" -H "Content-Type: application/json" \
+  -d '{"request":"A culture weekend from Amsterdam around 18 December, mid budget.","requested_by":"mallory"}' | jq -r .requested_by    # → alice
+
+# nobody decides on their own trip (dave is a requester AND an approver)
+T=$(./desk_cli.py new "A food and city break from Amsterdam around 19 December, mid budget." --as dave | cut -d' ' -f1)
+until ./desk_cli.py inbox --as bob | grep -q "trip $T"; do sleep 3; done
+A=$(./desk_cli.py inbox --as bob | grep "trip $T" | awk '{print $1}')
+./desk_cli.py approve $A --as dave               # → 403 ... you cannot decide on a trip you requested
+./desk_cli.py show $T --as dave | grep approval_refused      # → the refusal is in the audit log, with dave's name
+./desk_cli.py cancel $T --as dave
+```
+
+Expected: every line shows the result in its comment. (Requesters see only their own trips: `./desk_cli.py trips --as alice` never lists dave's.)
 
 ---
 

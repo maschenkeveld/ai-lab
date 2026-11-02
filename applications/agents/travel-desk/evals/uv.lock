@@ -2188,6 +2188,7 @@ dependencies = [
     { name = "dbos" },
     { name = "fastapi" },
     { name = "psycopg", extra = ["binary", "pool"] },
+    { name = "pyjwt", extra = ["crypto"] },
     { name = "travel-common" },
 ]
 
@@ -2196,6 +2197,7 @@ requires-dist = [
     { name = "dbos", specifier = ">=2.10.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "psycopg", extras = ["binary", "pool"], specifier = ">=3.2.13" },
+    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.9" },
     { name = "travel-common", editable = "../common" },
 ]
 

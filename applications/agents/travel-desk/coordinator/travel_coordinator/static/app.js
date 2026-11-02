@@ -1,10 +1,13 @@
 // Travel desk SPA: no build step, no dependencies. It polls the REST API under ./api/ every couple of seconds.
-const api = (path, options) =>
-  fetch(`api/${path}`, { headers: { "Content-Type": "application/json" }, ...options }).then(async (r) => {
-    const body = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(body.detail || body.error || `HTTP ${r.status}`);
-    return body;
-  });
+const api = async (path, options) => {
+  const headers = { "Content-Type": "application/json" };
+  if (state.authOn) headers.Authorization = `Bearer ${await deskAuth.token()}`;
+  const r = await fetch(`api/${path}`, { ...options, headers });
+  const body = await r.json().catch(() => ({}));
+  if (r.status === 401 && state.authOn) { await deskAuth.login(); }
+  if (!r.ok) throw new Error(body.detail || body.error || `HTTP ${r.status}`);
+  return body;
+};
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const label = (s) => String(s).replaceAll("_", " ");
@@ -12,16 +15,27 @@ const badge = (s) => `<span class="badge ${esc(s)}">${esc(label(s))}</span>`;
 const time = (iso) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 const money = (n, c = "EUR") => (n == null ? "–" : `${Number(n).toFixed(2)} ${c}`);
 
-const state = { selected: null, trips: [], config: null, rendered: {}, comment: {} };
+const state = { selected: null, trips: [], config: null, rendered: {}, comment: {}, authOn: false, me: null };
 const EXAMPLES = [
   "A culture weekend from Amsterdam around 18 December, mid budget, museums please.",
   "Food and nightlife in a city I can reach for under 100 EUR, leaving around 20 December, a day or two either way.",
   "A relaxing trip for two people... actually just me, high budget, 22 December.",
 ];
 
-const approver = () => $("approver").value.trim();
-$("approver").value = localStorage.getItem("desk.approver") || "";
-$("approver").addEventListener("input", () => { localStorage.setItem("desk.approver", approver()); state.rendered.detail = null; });
+// Who is acting. With Keycloak on, the token says (the server ignores any name we send); with it off, a typed name.
+const approver = () => (state.authOn ? state.me?.username || "" : ($("approver")?.value || "").trim());
+function renderWho() {
+  const el = $("who");
+  if (state.authOn) {
+    const role = state.me.is_approver ? "approver" : "requester";
+    el.innerHTML = `Signed in as <strong>${esc(state.me.username)}</strong> <span class="badge">${role}</span> <button id="signout">Sign out</button>`;
+    $("signout").addEventListener("click", () => deskAuth.signOut());
+  } else {
+    el.innerHTML = 'Approving as <input id="approver" placeholder="your name" maxlength="40" autocomplete="off">';
+    $("approver").value = localStorage.getItem("desk.approver") || "";
+    $("approver").addEventListener("input", () => { localStorage.setItem("desk.approver", approver()); state.rendered.detail = null; });
+  }
+}
 
 $("examples").innerHTML = EXAMPLES.map((e, i) => `<span class="chip" data-i="${i}">example ${i + 1}</span>`).join("");
 $("examples").addEventListener("click", (e) => { if (e.target.dataset.i) $("request").value = EXAMPLES[e.target.dataset.i]; });
@@ -30,7 +44,7 @@ $("create").addEventListener("click", async () => {
   $("create-error").textContent = "";
   $("create").disabled = true;
   try {
-    const trip = await api("trips", { method: "POST", body: JSON.stringify({ request: $("request").value, requested_by: approver() || "anonymous" }) });
+    const trip = await api("trips", { method: "POST", body: JSON.stringify({ request: $("request").value, requested_by: state.authOn ? undefined : approver() || "anonymous" }) });
     $("request").value = "";
     state.selected = trip.id;
     await refresh();
@@ -58,7 +72,11 @@ function approvalCard(a, trip) {
   const bar = Array.from({ length: a.required }, (_, i) => `<span class="${i < approvals.length ? "on" : ""}"></span>`).join("");
   const p = a.proposal;
   const pending = a.status === "pending";
-  const needsName = !approver();
+  const mine = state.authOn && trip.requested_by === state.me.username;
+  const mayDecide = state.authOn ? state.me.is_approver && !mine : !!approver();
+  const why = state.authOn ? (!state.me.is_approver ? "Only approvers can decide." : mine ? "You requested this trip, so someone else has to decide." : "")
+                           : "Enter your name (top right) to decide.";
+  const needsName = !mayDecide;
   const decided = a.decisions.map((d) => `<div class="muted">${esc(d.approver)} → <strong>${esc(d.decision)}</strong>${d.comment ? `: “${esc(d.comment)}”` : ""}</div>`).join("");
   const saving = p.saving ? ` · saves <strong>${money(p.saving)}</strong>` : "";
   return `<div class="card approval ${a.escalated && pending ? "escalated" : ""}">
@@ -75,7 +93,7 @@ function approvalCard(a, trip) {
         <button class="good" data-act="approve" data-id="${esc(a.id)}" ${needsName ? "disabled" : ""}>Approve</button>
         ${a.kind === "booking" ? `<button data-act="edit" data-id="${esc(a.id)}" ${needsName ? "disabled" : ""}>Edit…</button>` : ""}
         <button class="bad" data-act="reject" data-id="${esc(a.id)}" ${needsName ? "disabled" : ""}>Reject</button>
-        ${needsName ? '<span class="muted">Enter your name (top right) to decide.</span>' : ""}
+        ${needsName ? `<span class="muted">${esc(why)}</span>` : ""}
       </div>` : ""}
     <p class="error" data-error="${esc(a.id)}"></p></div>`;
 }
@@ -99,7 +117,7 @@ function proposalCard(trip) {
 function renderDetail(snap) {
   const { trip, approvals, audit } = snap;
   const open = !["completed", "rejected", "expired", "cancelled", "failed"].includes(trip.status);
-  const canShock = state.config?.demo_mode && ["booked", "rebooking"].includes(trip.status);
+  const canShock = state.config?.demo_mode && (!state.authOn || state.me.is_approver) && ["booked", "rebooking"].includes(trip.status);
   const html = `<div class="stack">
     <div class="card"><div class="row"><h3 style="margin:0">${esc(trip.proposal?.destination?.name || "Trip")}</h3>${badge(trip.status)}
       <span class="muted" style="margin-left:auto">${esc(trip.id)} · requested by ${esc(trip.requested_by)}</span></div>
@@ -125,10 +143,10 @@ $("detail").addEventListener("click", async (e) => {
     if (b.dataset.act) {
       const comment = state.comment[b.dataset.id] || "";
       b.disabled = true;
-      await api(`approvals/${b.dataset.id}/decision`, { method: "POST", body: JSON.stringify({ approver: approver(), decision: b.dataset.act, comment }) });
+      await api(`approvals/${b.dataset.id}/decision`, { method: "POST", body: JSON.stringify({ approver: state.authOn ? undefined : approver(), decision: b.dataset.act, comment }) });
       delete state.comment[b.dataset.id];
     } else if (b.dataset.tripAct === "cancel") {
-      await api(`trips/${state.selected}/cancel`, { method: "POST", body: JSON.stringify({ actor: approver() || "anonymous" }) });
+      await api(`trips/${state.selected}/cancel`, { method: "POST", body: JSON.stringify({ actor: state.authOn ? undefined : approver() || "anonymous" }) });
     } else if (b.dataset.tripAct === "shock") {
       await api(`demo/fare-drop/${state.selected}`, { method: "POST", body: JSON.stringify({ pct: -25 }) });
     }
@@ -153,7 +171,7 @@ $("edit-confirm").addEventListener("click", async () => {
   if ($("edit-destination").value !== editing.destination) edit.destination = $("edit-destination").value;
   if ($("edit-date").value !== editing.date) edit.date = $("edit-date").value;
   try {
-    await api(`approvals/${editing.id}/decision`, { method: "POST", body: JSON.stringify({ approver: approver(), decision: "edit", comment: $("edit-comment").value, edit }) });
+    await api(`approvals/${editing.id}/decision`, { method: "POST", body: JSON.stringify({ approver: state.authOn ? undefined : approver(), decision: "edit", comment: $("edit-comment").value, edit }) });
     state.rendered.detail = null;
     refresh();
   } catch (err) { alert(err.message); }
@@ -168,12 +186,22 @@ function renderPolicy(config) {
 
 async function refresh() {
   try {
-    if (!state.config) { state.config = await api("config"); renderPolicy(state.config); }
-    const [trips, pending] = await Promise.all([api("trips"), api("approvals?status=pending")]);
+    if (!state.config) {
+      state.config = await api("config");
+      state.authOn = state.config.auth.enabled;
+      if (state.authOn) await deskAuth.init(state.config.auth);
+      state.me = await api("me");
+      renderWho();
+      renderPolicy(state.config);
+    }
+    const [trips, pending] = await Promise.all([api("trips"), state.me.is_approver ? api("approvals?status=pending") : Promise.resolve([])]);
     if (!state.selected && trips.length) state.selected = trips[0].id;
     renderList(trips, pending.length);
     if (state.selected) renderDetail(await api(`trips/${state.selected}`));
-  } catch (e) { console.warn(e); }
+  } catch (e) {
+    console.warn(e);
+    if (!state.me) $("detail").innerHTML = `<div class="empty error">${esc(e.message)}</div>`;  // sign-in failed: say so on the page
+  }
 }
 refresh();
 setInterval(refresh, 2000);

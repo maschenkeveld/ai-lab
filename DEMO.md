@@ -193,7 +193,7 @@ The backends are plain REST services with no MCP code in them. agentgateway rout
 
 ### Step 1: Plan a trip
 
-Open `http://agentgateway.lab/desk/`. Type your name top right (that is who you approve as). Paste a request, for example:
+Open `http://agentgateway.lab/desk/`. It sends you to Keycloak: sign in as **alice** (password `demo`), a requester. Open a second private window and sign in as **bob**, an approver, so you can play both people. Back in alice's window, paste a request, for example:
 
 > A culture weekend from Amsterdam around 18 December, mid budget, a day or two either way, museums please.
 
@@ -211,17 +211,20 @@ The page shows the proposal (destination, flight, date, price, booking code in s
 | 60 to 180 EUR | one approver |
 | 180 EUR and up | two different approvers |
 
-The policy is code, not a prompt: a model cannot talk the desk into skipping an approval.
+The policy is code, not a prompt: a model cannot talk the desk into skipping an approval. Alice's page shows her trip and its approval but no approve button ("Only approvers can decide"), and she has no approval queue. Bob's page lists the pending approval.
 
 ### Step 3: Decide
 
-Press **Approve** (try a second trip and press **Reject** to see the hold released, or **Edit…** to pick another destination, which cancels the hold and researches again). For a two-approver trip, approve as one name, then try the same name again: the desk refuses ("has already decided"), even with different capitalisation. Change the name at the top right and approve again.
+In **bob's** window press **Approve** (try a second trip and press **Reject** to see the hold released, or **Edit…** to pick another destination, which cancels the hold and researches again). Three things the server enforces, from the people's real identities:
+- **You cannot approve your own trip.** Sign in as **dave** (he is a requester *and* an approver), plan a trip, and look at the approval: the buttons are disabled with "You requested this trip, so someone else has to decide". Try anyway from the terminal: `./desk_cli.py approve <approval_id> --as dave` → `403 ... you cannot decide on a trip you requested`, and the attempt is in the audit log as `approval_refused`.
+- **A requester cannot decide at all.** `./desk_cli.py approve <approval_id> --as alice` → `403 ... this needs the 'desk-approver' role`.
+- **Nobody approves twice.** For a two-approver trip, approve as bob, then try bob again (it is refused, "has already decided"), then approve as **carol**.
 
 The booking is **confirmed**; its status in the proposal card goes from *held* to *scheduled*.
 
 ### Step 4: The fare drops
 
-The `fare-watcher` is a long-running agent: a workflow per booking that wakes every 30 seconds and re-quotes the fare. Press **Simulate a fare drop** (or `./desk_cli.py drop <trip_id>`). Within 30 seconds the page shows a new approval, "Rebook at a lower fare", with the saving. A model judged that the drop was worth asking about; the coordinator asked a human.
+The `fare-watcher` is a long-running agent: a workflow per booking that wakes every 30 seconds and re-quotes the fare. As **bob** (the button is only shown to approvers) press **Simulate a fare drop** (or `./desk_cli.py drop <trip_id> --as bob`). Within 30 seconds the page shows a new approval, "Rebook at a lower fare", with the saving. A model judged that the drop was worth asking about; the coordinator asked a human.
 
 Approve it. The audit log shows the saga's order: hold the new booking, confirm it, only then cancel the old one. The traveller is never without a seat.
 
@@ -237,7 +240,7 @@ Wait for the new pod (`kubectl -n travel-desk get pods -w`). Reload the page: th
 
 ### Step 6: The audit trail
 
-Open any trip and read the audit log: every step, who did it (a person, `policy`, `booking-agent`, `fare-watcher`), in order. Then try to rewrite history:
+Open any trip and read the audit log: every step, who did it (a person from their Keycloak token, `policy`, `booking-agent`, `fare-watcher`), in order. Nobody can claim to be someone else: even a request body that says `"approver": "mallory"` is recorded as the token's user. Then try to rewrite history:
 
 ```bash
 kubectl -n travel-desk exec desk-postgres-0 -- psql -U postgres -d coordinator \
@@ -249,16 +252,13 @@ kubectl -n travel-desk exec desk-postgres-0 -- psql -U postgres -d coordinator \
 
 ```bash
 cd applications/agents/travel-desk
-./desk_cli.py inbox                 # the approval queue, from the terminal
-./desk_cli.py show <trip_id>        # proposal, approvals, audit
-./desk_cli.py demo                  # the whole flow, scripted
+./desk_cli.py inbox --as bob        # the approval queue, from the terminal (alice would get a 403)
+./desk_cli.py show <trip_id> --as alice   # proposal, approvals, audit
+./desk_cli.py demo                  # the whole flow, scripted, as alice, bob and carol
 ```
 
 In Grafana → Explore → Tempo, search service `trip-coordinator`: the research is one trace tree from the coordinator through both scouts, their MCP tool calls, and the REST servers. In the gateway logs (`kubectl -n agentgateway-system logs deploy/agentgateway-proxy`) you can see every A2A hop and MCP call pass through.
 
----
-
-## Demo 4 — LLM Analytics
 ### Step 8: The catalog (optional)
 
 If agentregistry is installed (`cd k8s && task agentregistry:install && task agentregistry:apply`), open it with `task agentregistry:ui` and go to `http://localhost:12121`. It lists the desk's five agents and two MCP servers: what each does, which MCP servers each agent uses, that the agents speak A2A, and the agent-card URL. The gateway routes the traffic; the registry is how you discover what is there. The same data is in the API:
@@ -267,6 +267,9 @@ If agentregistry is installed (`cd k8s && task agentregistry:install && task age
 curl -s http://localhost:12121/v0/agents | jq -r '.items[] | "\(.metadata.name): uses \([.spec.mcpServers[]?.name] | join(", "))"'
 ```
 
+---
+
+## Demo 4 — LLM Analytics
 
 LiteLLM emits usage events to Kafka. The ingestor picks them up, generates embeddings, and stores them in Postgres. The analyzer clusters similar prompts and generates plugin recommendations. The React UI shows the results.
 

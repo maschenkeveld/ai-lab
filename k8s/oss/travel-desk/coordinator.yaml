@@ -49,6 +49,10 @@ spec:
               value: "postgresql://postgres:postgres@desk-postgres.travel-desk.svc.cluster.local:5432/coordinator"
             - name: DEMO_MODE
               value: "true"
+            - name: AUTH_REQUIRED          # sign-in with Keycloak: identity from the token, roles decide what you may do
+              value: "true"
+            - name: OIDC_ISSUER
+              value: "http://keycloak.lab:8080/realms/ai-lab"
             - name: FLIGHTS_REST_URL
               value: "http://rest-flights.rest-flights.svc.cluster.local:8000"
             - name: AGENT_DESTINATION_SCOUT
