@@ -285,6 +285,9 @@ type PriceResponse struct {
 	Currency     string  `json:"currency"`
 	FictivePrice float64 `json:"price"`
 	FlightNumber string  `json:"flight_number"`
+	// Set only when the fare market is moving (see market.go): the factor applied and when it was priced.
+	MarketMultiplier float64 `json:"market_multiplier,omitempty"`
+	PricedAt         string  `json:"priced_at,omitempty"`
 
 	Breakdown struct {
 		BasePerKm         float64 `json:"base_per_km"`
@@ -376,6 +379,7 @@ func main() {
 	mux.HandleFunc("/health", handleHealth)
 	mux.HandleFunc("/v1/airports", handleAirports)
 	mux.HandleFunc("/v1/price", handlePrice)
+	mux.HandleFunc("/v1/fare-shocks", handleFareShocks)
 
 	base := withCORS(withJSON(mux))
 
@@ -527,7 +531,8 @@ func computePrice(req PriceRequest) (*PriceResponse, error) {
 	jitter := deterministicJitterEUR(from, to, d) // -12..+12 EUR-ish
 
 	raw := (baseFare + distanceComponent) * monthMult
-	price := round2(max(19.0, raw+jitter))
+	market := marketMultiplier(from, to, d, time.Now())
+	price := round2(max(19.0, (raw+jitter)*market))
 
 	flightNumber := fmt.Sprintf("KA-%s%s", from, to)
 
@@ -540,6 +545,10 @@ func computePrice(req PriceRequest) (*PriceResponse, error) {
 		Currency:     "EUR",
 		FictivePrice: price,
 		FlightNumber: flightNumber,
+	}
+	if market != 1.0 {
+		resp.MarketMultiplier = math.Round(market*10000) / 10000
+		resp.PricedAt = time.Now().UTC().Format(time.RFC3339)
 	}
 	resp.Breakdown.BasePerKm = basePerKm
 	resp.Breakdown.BaseFare = baseFare

@@ -310,6 +310,11 @@ type CreateBookingRequest struct {
 	From string `json:"from"`
 	To   string `json:"to"`
 	Date string `json:"date"`
+
+	// Optional (see holds.go): reserve without confirming, and make retries safe.
+	Hold           bool   `json:"hold,omitempty"`
+	HoldSeconds    int    `json:"hold_seconds,omitempty"`
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
 }
 
 // ---------- Server ----------
@@ -364,6 +369,10 @@ func main() {
 		logger.Error("failed to initialize database", slog.Any("error", err))
 		os.Exit(1)
 	}
+	if err := migrateHolds(db); err != nil {
+		logger.Error("failed to migrate database", slog.Any("error", err))
+		os.Exit(1)
+	}
 
 	logger.Info("database initialized", slog.String("path", dbPath))
 
@@ -372,6 +381,9 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handleHealth)
 	mux.HandleFunc("/v1/bookings", s.handleBookings)
+	mux.HandleFunc("GET /v1/bookings/{code}", s.getBooking)
+	mux.HandleFunc("POST /v1/bookings/{code}/confirm", s.confirmBooking)
+	mux.HandleFunc("POST /v1/bookings/{code}/cancel", s.cancelBooking)
 
 	base := withCORS(withJSON(mux))
 
@@ -440,6 +452,11 @@ func (s *server) createBooking(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		logger.WarnContext(ctx, "invalid JSON body", slog.Any("error", err))
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON body")
+		return
+	}
+
+	if req.Hold || strings.TrimSpace(req.IdempotencyKey) != "" {
+		s.createHeldBooking(w, r, req)
 		return
 	}
 

@@ -32,6 +32,10 @@ spec:
               value: "true"
             - name: OTEL_METRICS_ENABLED
               value: "true"
+            - name: FARE_TICK_SECONDS     # fares re-roll every 30s so the fare-watcher has something to watch
+              value: "30"
+            - name: ENABLE_FARE_SHOCKS    # POST /v1/fare-shocks, for the demo's "simulate a fare drop"
+              value: "true"
           ports:
             - containerPort: 8000
 ---
