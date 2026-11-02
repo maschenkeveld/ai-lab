@@ -1,5 +1,5 @@
 [project]
-name = "mcp-book-flights-adapter"
+name = "mcp-travel-search-adapter"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
@@ -19,4 +19,4 @@ requires = ["setuptools>=75.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["mcp_book_flights_adapter*"]
+include = ["mcp_travel_search_adapter*"]

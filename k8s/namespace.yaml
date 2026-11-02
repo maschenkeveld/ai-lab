@@ -16,26 +16,6 @@ metadata:
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: mcp-dice-roller
----
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: mcp-destinations
----
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: mcp-flights
----
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: mcp-book-flights
----
-apiVersion: v1
-kind: Namespace
-metadata:
   name: rest-destinations
 ---
 apiVersion: v1
@@ -82,3 +62,13 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: agentgateway-system
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mcp-travel-search
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mcp-bookings

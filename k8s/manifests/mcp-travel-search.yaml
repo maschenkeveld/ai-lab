@@ -1,25 +1,29 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: mcp-destinations
-  namespace: mcp-destinations
+  name: mcp-travel-search
+  namespace: mcp-travel-search
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: mcp-destinations
+      app: mcp-travel-search
   template:
     metadata:
       labels:
-        app: mcp-destinations
+        app: mcp-travel-search
     spec:
       containers:
-        - name: mcp-destinations
-          image: mcp-destinations:latest
+        - name: mcp-travel-search
+          image: mcp-travel-search:latest
           imagePullPolicy: Never
           env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: __OTEL_ENDPOINT__
             - name: DESTINATIONS_BASE_URL
               value: http://rest-destinations.rest-destinations.svc.cluster.local:8000
+            - name: FLIGHTS_BASE_URL
+              value: http://rest-flights.rest-flights.svc.cluster.local:8000
             - name: HOST
               value: 0.0.0.0
             - name: PORT
@@ -32,11 +36,11 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: mcp-destinations
-  namespace: mcp-destinations
+  name: mcp-travel-search
+  namespace: mcp-travel-search
 spec:
   selector:
-    app: mcp-destinations
+    app: mcp-travel-search
   ports:
     - name: mcp
       port: 8000

@@ -1,23 +1,25 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: mcp-book-flights
-  namespace: mcp-book-flights
+  name: mcp-bookings
+  namespace: mcp-bookings
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: mcp-book-flights
+      app: mcp-bookings
   template:
     metadata:
       labels:
-        app: mcp-book-flights
+        app: mcp-bookings
     spec:
       containers:
-        - name: mcp-book-flights
-          image: mcp-book-flights:latest
+        - name: mcp-bookings
+          image: mcp-bookings:latest
           imagePullPolicy: Never
           env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: __OTEL_ENDPOINT__
             - name: BOOK_FLIGHTS_BASE_URL
               value: http://rest-book-flights.rest-book-flights.svc.cluster.local:8000
             - name: HOST
@@ -32,11 +34,11 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: mcp-book-flights
-  namespace: mcp-book-flights
+  name: mcp-bookings
+  namespace: mcp-bookings
 spec:
   selector:
-    app: mcp-book-flights
+    app: mcp-bookings
   ports:
     - name: mcp
       port: 8000

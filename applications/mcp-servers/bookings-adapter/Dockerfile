@@ -9,7 +9,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-install-project --no-dev
 
-COPY mcp_destinations_adapter ./mcp_destinations_adapter
+COPY mcp_bookings_adapter ./mcp_bookings_adapter
 RUN uv sync --frozen --no-dev
 
 ENV PATH="/app/.venv/bin:$PATH"
@@ -20,4 +20,4 @@ ENV MCP_PATH=/mcp
 ARG APP_VERSION=dev
 ENV APP_VERSION=$APP_VERSION
 
-CMD ["python", "-m", "mcp_destinations_adapter.server"]
+CMD ["python", "-m", "mcp_bookings_adapter.server"]

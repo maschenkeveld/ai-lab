@@ -1,3 +1,4 @@
+"""MCP adapter for travel search: destinations and flight fares, over the two Go REST services."""
 import os
 from typing import Annotated, Any
 
@@ -9,19 +10,23 @@ from starlette.responses import JSONResponse
 
 from .otel import setup_otel
 
-setup_otel("mcp-destinations-adapter")
+setup_otel("mcp-travel-search")
 
 DESTINATIONS_BASE_URL = os.getenv(
     "DESTINATIONS_BASE_URL",
     "http://rest-destinations.rest-destinations.svc.cluster.local:8000",
 )
+FLIGHTS_BASE_URL = os.getenv(
+    "FLIGHTS_BASE_URL",
+    "http://rest-flights.rest-flights.svc.cluster.local:8000",
+)
 
-mcp = FastMCP("destinations")
+mcp = FastMCP("travel-search")
 
 
 @mcp.custom_route("/health", methods=["GET"])
 async def health(request: Request) -> JSONResponse:
-    return JSONResponse({"status": "ok", "agent": "mcp-destinations-adapter"})
+    return JSONResponse({"status": "ok", "agent": "mcp-travel-search"})
 
 
 @mcp.tool
@@ -90,6 +95,42 @@ async def get_destination(
 async def post_json(path: str, payload: dict[str, Any]) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=10.0) as client:
         response = await client.post(f"{DESTINATIONS_BASE_URL.rstrip('/')}{path}", json=payload)
+        response.raise_for_status()
+        return response.json()
+
+
+@mcp.tool
+async def list_airports() -> dict[str, Any]:
+    """List all airports supported by the flight pricing service, including IATA code, city, country, and coordinates."""
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        response = await client.get(f"{FLIGHTS_BASE_URL.rstrip('/')}/v1/airports")
+        response.raise_for_status()
+        return response.json()
+
+
+@mcp.tool
+async def flight_price(
+    from_iata: Annotated[
+        str,
+        Field(description="Three-letter origin airport IATA code, for example AMS."),
+    ],
+    to_iata: Annotated[
+        str,
+        Field(description="Three-letter destination airport IATA code, for example CDG or LHR."),
+    ],
+    date: Annotated[
+        str,
+        Field(description="Travel date in YYYY-MM-DD format."),
+    ],
+) -> dict[str, Any]:
+    """Calculate a booking-ready flight quote with flight number, route, date, price, distance, and currency."""
+    payload = {
+        "from": from_iata.upper(),
+        "to": to_iata.upper(),
+        "date": date,
+    }
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        response = await client.post(f"{FLIGHTS_BASE_URL.rstrip('/')}/v1/price", json=payload)
         response.raise_for_status()
         return response.json()
 
