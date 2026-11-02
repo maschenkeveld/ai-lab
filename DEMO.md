@@ -1,17 +1,19 @@
-# OSS AI Lab — Demo Guide (local Kind lab)
+# OSS AI Lab: Demo Guide (local Kind lab)
 
 ## Setting the scene
 
-A fully local AI platform running on a Kind cluster, built entirely from open-source components. It demonstrates multi-provider LLM routing, MCP tool exposure, and a multi-agent travel workflow where separate agents talk to each other over A2A — all on a laptop.
+A fully local AI platform running on a Kind cluster, built entirely from open-source components. It shows multi-provider LLM routing (including a model running on your own Mac), MCP tool exposure, and the **travel desk**: separate agents that talk to each other over A2A, with a durable workflow, human approval, and a web app, all on a laptop.
 
-The travel agency runs as **5 separate Python agents** (Pydantic AI + FastA2A) communicating over A2A JSON-RPC through agentgateway. Their tools are reached over MCP through the same gateway:
+The travel desk is **five Python agents** (Pydantic AI + FastA2A) talking A2A through agentgateway, with their tools reached over MCP through the same gateway:
 
 ```
-Client → agentgateway → orchestrator (Pydantic AI)
-                          → agentgateway → destination        → Traefik → REST API
-                          → agentgateway → destination-decision
-                          → agentgateway → flight-finder      → Traefik → REST API
-                          → agentgateway → flight-booker      → Traefik → REST API
+Browser / client → agentgateway
+   /desk/                    → the web app and REST API
+   /a2a/trip-coordinator     → coordinator (durable workflow, approvals, Postgres)
+        → agentgateway → destination-scout → MCP travel-search → REST
+        → agentgateway → flight-scout      → MCP travel-search → REST
+        → agentgateway → booking-agent     → MCP bookings      → REST   (no LLM: moves the money)
+        → agentgateway → fare-watcher      → MCP travel-search → REST   (watches fares for days)
 ```
 
 ---
@@ -27,7 +29,7 @@ task up
 
 This takes a few minutes on first run (image pulls). Subsequent runs are fast.
 
-**Tip for any live demo:** keep `kubectl logs -n travel-agency -l app=orchestrator -f` open in a second terminal, and Grafana → Explore → Tempo in a browser tab. The agents log each request, and one trip is one trace tree.
+**Tip for any live demo:** keep the web app (`http://agentgateway.lab/desk/`) on one screen and `kubectl -n travel-desk logs -f deploy/coordinator` on another, with Grafana → Explore → Tempo in a browser tab.
 
 ---
 
@@ -43,40 +45,28 @@ curl http://traefik-api-gw.lab/destinations/health
 curl http://traefik-api-gw.lab/book-flights/health
 ```
 
-**LiteLLM — confirm models are loaded:**
+**LiteLLM: confirm models are loaded:**
 
 ```bash
 curl -H "Authorization: Bearer sk-ai-lab-litellm" http://litellm.lab/v1/models
 ```
 
-Expected: a list with `openai-gpt`, `gemini-pro`, `ollama-llama`.
+Expected: `openai-gpt`, `gemini-pro`, `ollama-llama`, `local-vllm`, `embedding-openai`.
 
 **All 5 agent cards reachable through agentgateway:**
 
 ```bash
-curl http://agentgateway.lab/a2a/travel-orchestrator/.well-known/agent-card.json
-curl http://agentgateway.lab/a2a/destination/.well-known/agent-card.json
-curl http://agentgateway.lab/a2a/destination-decision/.well-known/agent-card.json
-curl http://agentgateway.lab/a2a/flight-finder/.well-known/agent-card.json
-curl http://agentgateway.lab/a2a/flight-booker/.well-known/agent-card.json
+for A in trip-coordinator destination-scout flight-scout booking-agent fare-watcher; do
+  curl -s http://agentgateway.lab/a2a/$A/.well-known/agent-card.json | jq -r '.name'
+done
 ```
 
-Each should return a JSON agent card with `name`, `description`, and `skills`.
+**The web app:** open `http://agentgateway.lab/desk/`.
 
 **Kafka accessible from Mac terminal:**
 
 ```bash
 kafka-topics --bootstrap-server kafka-direct.lab:9092 --list
-```
-
-**MCP tools reachable:**
-
-```bash
-# Connect an MCP client (e.g. Claude Desktop) to these endpoints:
-http://agentgateway.lab/mcp-dice-roller
-http://agentgateway.lab/mcp-destinations
-http://agentgateway.lab/mcp-flights
-http://agentgateway.lab/mcp-book-flights
 ```
 
 ---
@@ -131,142 +121,122 @@ Same request body, three different providers. The client doesn't need to know wh
 
 ---
 
-## Demo 2 — MCP tools via agentgateway
+**Same request to the model running on your Mac** (after `task inference:run`, see Demo 5):
+
+```bash
+curl http://litellm.lab/v1/chat/completions \
+  -H "Authorization: Bearer sk-ai-lab-litellm" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "local-vllm", "messages": [{"role": "user", "content": "What does an API gateway do? Three words."}]}'
+```
+
+---
+
+## Demo 2: MCP tools via agentgateway
 
 **What to show:** agentgateway exposes MCP servers as tools that any MCP client can discover and call.
 
 **Connect Claude Desktop (or any MCP client) to:**
 
 ```
-http://agentgateway.lab/mcp-flights
+http://agentgateway.lab/mcp-travel-search
+http://agentgateway.lab/mcp-bookings
 ```
 
-The client will discover and list available tools. You can invoke `flight_price` directly from the MCP client without writing any agent code.
+The client discovers the tools. You can call `flight_price` directly without writing any agent code.
 
-**To verify the tool list from the CLI:**
+**To verify the tool lists from the CLI** (MCP is stateful: initialize, then send the session id it returns):
 
 ```bash
-curl -X POST http://agentgateway.lab/mcp-flights \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+for ENDPOINT in mcp-travel-search mcp-bookings; do
+  SID=$(curl -s -D - -o /dev/null -X POST http://agentgateway.lab/$ENDPOINT \
+    -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"demo","version":"1"}}}' \
+    | grep -i '^mcp-session-id' | awk '{print $2}' | tr -d '\r')
+  echo "$ENDPOINT:"
+  curl -s -X POST http://agentgateway.lab/$ENDPOINT \
+    -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -H "Mcp-Session-Id: $SID" \
+    -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | sed -n 's/^data: *//p' | jq -r '.result.tools[].name'
+done
 ```
-
-**All four MCP backends:**
 
 | MCP endpoint | Tools |
 | --- | --- |
-| `agentgateway.lab/mcp-flights` | `list_airports`, `flight_price` |
-| `agentgateway.lab/mcp-destinations` | `list_destinations`, `shortlist_destinations`, `get_destination` |
-| `agentgateway.lab/mcp-book-flights` | `create_booking`, `list_bookings` |
-| `agentgateway.lab/mcp-dice-roller` | `roll-2`, `roll-6`, `roll-20` |
+| `agentgateway.lab/mcp-travel-search` | `list_destinations`, `shortlist_destinations`, `get_destination`, `list_airports`, `flight_price` |
+| `agentgateway.lab/mcp-bookings` | `hold_booking`, `confirm_booking`, `cancel_booking`, `get_booking`, `list_bookings` |
 
-The backends are plain REST services — no MCP code in them. agentgateway handles the protocol conversion.
+The backends are plain REST services with no MCP code in them. agentgateway routes the protocol; the FastMCP adapters translate to REST.
 
 ---
 
-## Demo 3 — A2A multi-agent workflow (Pydantic AI)
+## Demo 3: The travel desk (A2A, durable workflow, human in the loop)
 
-**What to show:** five independent Python microservices, each with an A2A endpoint, coordinated by an orchestrator agent through agentgateway. Agents call agents over A2A, and tools over MCP.
+**What to show:** agents that call each other over A2A, a workflow that lasts as long as the people involved take, a booking that is held, approved under a policy, and confirmed, and a system that survives a restart in the middle.
 
-### Step 1 — Discover the agents
+### Step 1: Plan a trip
 
-Each service publishes a standard A2A agent card:
+Open `http://agentgateway.lab/desk/`. Type your name top right (that is who you approve as). Paste a request, for example:
 
-```bash
-curl http://agentgateway.lab/a2a/travel-orchestrator/.well-known/agent-card.json | jq .
-```
+> A culture weekend from Amsterdam around 18 December, mid budget, a day or two either way, museums please.
 
-The orchestrator describes its `plan-trip` skill and references its public URL through agentgateway — not its internal pod address. agentgateway is the only thing external callers ever see.
+Press **Plan it** and watch the trip's status: *researching*, then *holding*, then *awaiting approval*. In those ~25 seconds the coordinator extracted the request with a model, asked `destination-scout` and `flight-scout` over A2A (which called MCP tools), and **held** a flight through `booking-agent`.
 
-### Step 2 — Trigger the workflow
+Show the agent cards while it works: `curl http://agentgateway.lab/a2a/booking-agent/.well-known/agent-card.json | jq .` The booking agent's card says it is deterministic. It has no model, by design.
 
-```bash
-curl -X POST http://agentgateway.lab/a2a/travel-orchestrator/plan \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "Plan a high budget museum trip for Maarten from AMS on 2026-07-15", "thread_id": "demo-1"}' \
-  | jq .
-```
+### Step 2: The proposal and the policy
 
-The response includes:
-- `shortlist` — 5 candidate destinations
-- `selected_destination` — the one chosen
-- `flight` — found flight details
-- `status` — `"awaiting_approval"`, not a confirmed booking yet (see Step 3)
-- `pending_approval` — the proposed booking, waiting on a human decision
-- `answer` — explains that it's waiting for approval
+The page shows the proposal (destination, flight, date, price, booking code in state *held*, alternatives) and a briefing a model wrote for the approver. Point at the policy box:
 
-### Step 3 — Approve (or reject) the booking
+| Flight price | Who must approve |
+|---|---|
+| under 60 EUR | nobody, booked automatically |
+| 60 to 180 EUR | one approver |
+| 180 EUR and up | two different approvers |
 
-**What to show:** booking a flight is the one irreversible, money-committing step in this
-workflow, so `book_flight` pauses and waits for a human decision instead of booking
-immediately (the tool is declared `requires_approval=True`, see `book_flight` in `planner.py`).
+The policy is code, not a prompt: a model cannot talk the desk into skipping an approval.
 
-```bash
-# See what's waiting for a decision
-curl http://agentgateway.lab/a2a/travel-orchestrator/pending | jq .
+### Step 3: Decide
 
-# Approve it — completes the booking
-curl -X POST http://agentgateway.lab/a2a/travel-orchestrator/approve \
-  -H "Content-Type: application/json" \
-  -d '{"thread_id": "demo-1", "approved": true}' | jq .
+Press **Approve** (try a second trip and press **Reject** to see the hold released, or **Edit…** to pick another destination, which cancels the hold and researches again). For a two-approver trip, approve as one name, then try the same name again: the desk refuses ("has already decided"), even with different capitalisation. Change the name at the top right and approve again.
 
-# Or reject it — confirms nothing was booked
-curl -X POST http://agentgateway.lab/a2a/travel-orchestrator/approve \
-  -H "Content-Type: application/json" \
-  -d '{"thread_id": "demo-1", "approved": false}' | jq .
-```
+The booking is **confirmed**; its status in the proposal card goes from *held* to *scheduled*.
 
-The approved response now includes `booking` (a real confirmation code) and `status: "booked"`.
-The rejected response shows `status: "rejected"` and `booking: null` — and the flight-booker
-specialist is never called at all in that case (confirm this live in Grafana Loki: no
-`flight-booker` request appears for a rejected thread_id). Pending approvals are stored in Postgres, so
-they survive an orchestrator restart: `kubectl rollout restart deploy/orchestrator -n travel-agency`, then `/pending` again.
+### Step 4: The fare drops
 
-For the human-facing side of this rather than raw curl, use the approval CLI:
+The `fare-watcher` is a long-running agent: a workflow per booking that wakes every 30 seconds and re-quotes the fare. Press **Simulate a fare drop** (or `./desk_cli.py drop <trip_id>`). Within 30 seconds the page shows a new approval, "Rebook at a lower fare", with the saving. A model judged that the drop was worth asking about; the coordinator asked a human.
+
+Approve it. The audit log shows the saga's order: hold the new booking, confirm it, only then cancel the old one. The traveller is never without a seat.
+
+### Step 5: Kill the coordinator mid-approval
+
+Plan another trip and wait until it is awaiting approval. Then:
 
 ```bash
-cd applications/agents/travel-agency
-./approve_cli.py plan "Cultural city trip from Amsterdam, mid budget, museums, 2026-12-18. Book it."
-./approve_cli.py pending
-./approve_cli.py approve <thread_id>      # or: reject <thread_id>
+kubectl -n travel-desk delete pod -l app=coordinator
 ```
 
-It prints the proposed booking and the exact command to approve or reject it.
+Wait for the new pod (`kubectl -n travel-desk get pods -w`). Reload the page: the approval is still there. Approve it and the booking completes. The workflow lives in Postgres; the pod is disposable.
 
-### Step 4 — Show what happened under the hood
+### Step 6: The audit trail
 
-The orchestrator made **4 sequential A2A calls** through agentgateway, with a human decision
-in between the last two:
-
-```
-orchestrator → agentgateway/a2a/destination         → got shortlist of 5
-orchestrator → agentgateway/a2a/destination-decision → picked one
-orchestrator → agentgateway/a2a/flight-finder        → found flight
-                                                       ⏸ paused — awaiting human approval
-                                                       (your decision via /approve, Step 3)
-orchestrator → agentgateway/a2a/flight-booker        → confirmed booking (only if approved)
-```
-
-Call a specialist directly to make it concrete. A2A `message/send` is asynchronous: it returns a task, and you poll `tasks/get` for the result.
+Open any trip and read the audit log: every step, who did it (a person, `policy`, `booking-agent`, `fare-watcher`), in order. Then try to rewrite history:
 
 ```bash
-TASK=$(curl -s -X POST http://agentgateway.lab/a2a/flight-finder/ \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"message":{"kind":"message","messageId":"m1","role":"user","parts":[{"kind":"data","data":{"origin":"AMS","to_iata":"VIE","date":"2026-12-18"}}]}}}' \
-  | jq -r '.result.task.id')
-
-sleep 6
-curl -s -X POST http://agentgateway.lab/a2a/flight-finder/ \
-  -H "Content-Type: application/json" \
-  -d "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tasks/get\",\"params\":{\"id\":\"$TASK\"}}" \
-  | jq '.result.task.status.state, .result.task.artifacts[0].parts[0].data'
+kubectl -n travel-desk exec desk-postgres-0 -- psql -U postgres -d coordinator \
+  -c "UPDATE audit SET actor='mallory'"
+# ERROR:  the audit log is append-only
 ```
 
-The request is a typed `data` part (`FlightRequest`) and the result is a typed artifact (`FlightResult`): the contracts live in `common/travel_common/contracts.py` and both sides use the same Pydantic models.
+### Step 7: Under the hood
 
-### Step 5 — Show the retry loop (optional)
+```bash
+cd applications/agents/travel-desk
+./desk_cli.py inbox                 # the approval queue, from the terminal
+./desk_cli.py show <trip_id>        # proposal, approvals, audit
+./desk_cli.py demo                  # the whole flow, scripted
+```
 
-The orchestrator retries with a different destination if flight-finder returns nothing — but this is **prompt-driven, not graph-driven**. There is no hand-authored graph or conditional edge: the orchestrator is a single Pydantic AI tool-calling agent, and the retry behavior lives in `SYSTEM_PROMPT` in `applications/agents/travel-agency/orchestrator/travel_orchestrator/planner.py`, which tells the model to call `pick_destination` again with the failed IATA code appended to `tried_iata_codes` whenever `find_flight` returns `{"flight": null}`.
+In Grafana → Explore → Tempo, search service `trip-coordinator`: the research is one trace tree from the coordinator through both scouts, their MCP tool calls, and the REST servers. In the gateway logs (`kubectl -n agentgateway-system logs deploy/agentgateway-proxy`) you can see every A2A hop and MCP call pass through.
 
 ---
 
@@ -306,9 +276,34 @@ Then reload `http://analytics.lab` to see clusters and recommendations.
 
 ---
 
+---
+
+## Demo 5: A local model
+
+**What to show:** the same agents on a model that never leaves your laptop.
+
+```bash
+cd k8s
+task inference:run                 # terminal 1: vLLM-Metal serves Qwen2.5-14B from .env
+task inference:check               # terminal 2: model list plus a generation smoke test
+task secrets:litellm && kubectl -n litellm rollout restart deploy/litellm
+task desk:model -- local-vllm      # every desk agent now uses it
+```
+
+Plan a trip in the web app. It takes a little longer than with a hosted model (about 85 seconds to the first approval, against about 35), and the result has the same shape, because the desk keeps facts and policy in code and only asks the model for judgment. Compare the models on the hard part, reading a free-text request:
+
+```bash
+task eval -- --suite extraction --model openai-gpt
+task eval -- --suite extraction --model local-vllm
+```
+
+Put it back with `task desk:model -- openai-gpt`.
+
+---
+
 ## Observability
 
-### Grafana — `http://grafana.lab:3000`
+### Grafana: `http://grafana.lab:3000`
 
 Default credentials: `admin / admin`
 
@@ -321,25 +316,24 @@ Default credentials: `admin / admin`
 **Useful Loki queries:**
 
 ```logql
-# All travel agent logs
-{namespace="travel-agency"}
+# All travel desk logs
+{namespace="travel-desk"}
 
-# Just the orchestrator
-{namespace="travel-agency", app="orchestrator"}
+# Just the coordinator
+{namespace="travel-desk", app="coordinator"}
 
 # Errors across the lab
-{namespace=~"travel-agency|litellm|agentgateway-system"} |= "error"
+{namespace=~"travel-desk|litellm|agentgateway-system"} |= "error"
 ```
 
-### Tempo — one trace per trip
+### Tempo: one trace tree per piece of research
 
-Explore → Tempo → search service `travel-orchestrator`. A single `/plan` call is one trace tree across all five agents:
-- the orchestrator's agent run, with each LLM turn and each tool call (`get_destination_shortlist`, `pick_destination`, `find_flight`, `book_flight`)
-- under each tool call, the A2A hop through agentgateway into the specialist's own agent run
-- under that, the specialist's LLM turns and its MCP tool call, and the REST API span behind it
-- a retry, if a flight wasn't found on the first pick, as repeated `pick_destination` → `find_flight` calls
+Explore → Tempo → search service `trip-coordinator`. The research for a trip is one trace tree:
+- the coordinator's request, then an A2A hop through agentgateway into each scout's own agent run
+- under each, the scout's LLM turns and its MCP tool call, and the REST API span behind it
+- the booking agent's calls to the bookings MCP server and the booking REST server
 
-The booking approval splits a trip into two traces: the `/plan` call that ends with the pause, and the `/approve` call that resumes it.
+An approval is a separate trace: it starts when a human decides. The workflow's steps and the full history are in the audit log (Demo 3, Step 6).
 
 ### Kafka UI — `http://kafka-ui.lab`
 
@@ -350,17 +344,20 @@ Shows topic list, message counts, and live messages on `llm-usage`.
 ## Useful commands
 
 ```bash
-# Watch all travel agent pods
-kubectl get pods -n travel-agency -w
+# Watch all desk pods
+kubectl get pods -n travel-desk -w
 
-# Logs from a specific specialist
-kubectl logs -n travel-agency -l app=flight-finder -f
+# Logs from one agent
+kubectl logs -n travel-desk -l app=fare-watcher -f
 
-# Restart the orchestrator after a code change
-kubectl rollout restart deployment/orchestrator -n travel-agency
+# Restart the coordinator after a code change
+cd k8s && task build:desk-coordinator && task oss:desk-apply
 
-# Rebuild and redeploy just the agents
-cd k8s && task build:agency && task oss:agency-apply
+# Rebuild and redeploy the whole desk
+cd k8s && task build:desk && task oss:desk-apply
+
+# Run the evals against the live lab
+cd k8s && task eval
 
 # Check agentgateway routes
 kubectl get httproute -A
