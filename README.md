@@ -79,6 +79,20 @@ Auth via master key (`sk-ai-lab-litellm`). Config lives in `k8s/oss/litellm/conf
 
 LiteLLM covers multi-provider routing, model aliasing, and an OpenAI-compatible API surface. It does not have, compared with Kong's LLM gateway: semantic routing, an AI semantic cache, prompt/response guardrails, per-consumer rate limiting, RAG injection, or token-budget enforcement.
 
+### LLM through agentgateway (optional, an alternative to LiteLLM)
+
+agentgateway can carry LLM traffic too, so one gateway serves LLM, MCP and A2A. `cd k8s && task llm-gateway:apply` adds a backend per model and a route per backend (`k8s/oss/llm-gateway/llm-gateway.yaml`), and `task desk:llm -- gateway` points the desk at it (`gateway-local` for the Mac's vLLM, `litellm` to go back).
+
+| Route | Backend |
+|---|---|
+| `agentgateway.lab/llm/openai/v1/chat/completions` | OpenAI chat; the `model` a client sends is replaced by `gpt-4o-mini` |
+| `agentgateway.lab/llm/openai/v1/embeddings` | OpenAI embeddings (`text-embedding-3-small`) |
+| `agentgateway.lab/llm/local/v1/chat/completions` | vLLM-Metal on the Mac; `model` replaced by the one it serves |
+
+Tried against this lab: chat, streaming, embeddings and local vLLM all work, and the full desk passes its live end-to-end evals through it at the same speed (about 22s a trip). The gateway holds the provider key (clients send none that matters), logs every call with standard `gen_ai.*` attributes, and enforces **guardrails before a prompt reaches a provider**: the OpenAI chat backend rejects prompt-injection phrases with a 403 and masks emails, card numbers and SSNs. A local request limit returns 429 once exceeded.
+
+What it does not do, or does differently from LiteLLM: a model is chosen by *route*, not by the `model` field in the body (switching models means changing the base URL); there is no `/v1/models` listing (501); token budgets per client need its global rate-limit service, which is not deployed here (only per-gateway request limits were tested); Gemini and Ollama backends are not set up (the provider support exists); and the local vLLM route has no embeddings endpoint, so `destination-scout` falls back to keyword ranking there. LiteLLM stays the default; this is the path to show when the point is "one gateway for everything".
+
 ### agentgateway: MCP and A2A
 
 agentgateway (OCI Helm, `cr.agentgateway.dev/charts/agentgateway`) handles all agent and MCP traffic at `agentgateway.lab`.
@@ -169,6 +183,21 @@ cd k8s
 task inference:install     # once: vLLM-Metal via Homebrew (Apple Silicon)
 task inference:run         # blocking terminal: serves VLLM_MODEL from .env
 task inference:check       # model list plus a generation smoke test
+### Agent registry (optional)
+
+[agentregistry](https://github.com/agentregistry-dev/agentregistry) is an open-source catalog for MCP servers, agents, skills and prompts. It is a catalog and lifecycle tool, not a gateway: agentgateway routes the traffic, the registry records what exists, what it does and what depends on what. Here it holds the travel desk's two MCP servers and five agents.
+
+```bash
+cd k8s
+task agentregistry:install     # helm chart v0.4.0, namespace agentregistry; writes limited to that namespace
+task agentregistry:apply       # register the desk's MCP servers and agents (k8s/oss/agentregistry/catalog.yaml)
+task agentregistry:ui          # then open http://localhost:12121
+```
+
+What the catalog records: each MCP server as a remote streamable-HTTP endpoint behind agentgateway (`http://agentgateway.lab/mcp-travel-search`), and each agent with its A2A protocol, image, model, the MCP servers it uses (so `flight-scout → mcp-travel-search` is a reference you can query) and its A2A agent card URL as an annotation. The REST API is under `/v0` (`/v0/agents`, `/v0/mcpservers`, `POST /v0/apply` for YAML), and `http://localhost:12121/openapi.json` describes it.
+
+Notes from trying it: the chart's default RBAC is a cluster-wide ClusterRole that can write Deployments, Services, Secrets and ConfigMaps everywhere (it deploys things for you via kagent); `task agentregistry:install` scopes that with `rbac.watchedNamespaces`, which is enough for catalog use. The bundled Postgres is documented as dev-only. The catalog survived restarts of both pods here (it has a volume) but is gone if you recreate the cluster, so re-run `task agentregistry:apply`. The registry's own deploy feature (it found a default Kubernetes runtime) needs kagent and was not tried. The web UI was not checked in a browser.
+
 task secrets:litellm && kubectl -n litellm rollout restart deploy/litellm   # load the URL and key into LiteLLM
 task desk:model -- local-vllm    # point every desk agent at it (back: task desk:model -- openai-gpt)
 ```
@@ -237,6 +266,8 @@ All cluster operations are driven by `task` from the `k8s/` directory.
 
 ---
 
+| `task llm-gateway:apply` / `task desk:llm -- gateway` | Optional LLM path through agentgateway, and switching the desk to it |
+| `task agentregistry:install` / `:apply` / `:ui` | Optional agent and MCP catalog (agentregistry) |
 ## Repository structure
 
 ```
@@ -292,6 +323,8 @@ All cluster operations are driven by `task` from the `k8s/` directory.
 | [Colima](https://github.com/abiosoft/colima) | macOS Docker runtime — `--network-address` required |
 | [Kind](https://kind.sigs.k8s.io/) | Kubernetes in Docker |
 | [kubectl](https://kubernetes.io/docs/tasks/tools/) | |
+│       ├── llm-gateway/                  # optional: LLM backends and routes through agentgateway
+│       ├── agentregistry/                # optional: the desk's catalog for agentregistry
 | [Helm](https://helm.sh/) | |
 | [Task](https://taskfile.dev/) | |
 | [uv](https://docs.astral.sh/uv/) | Only to run the tests, evals and examples locally |

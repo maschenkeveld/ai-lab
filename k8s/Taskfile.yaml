@@ -494,6 +494,52 @@ tasks:
       - kubectl delete -f {{.TASKFILE_DIR}}/oss/routes/ || true
       - kubectl delete -f {{.TASKFILE_DIR}}/oss/travel-desk/ || true
       - kubectl delete -f {{.TASKFILE_DIR}}/oss/litellm/ || true
+  llm-gateway:apply:
+    desc: "Route LLM traffic through agentgateway too (an alternative to LiteLLM): secrets, backends and routes"
+    cmds:
+      - |
+        : "${OPENAI_KEY:?Set OPENAI_KEY in .env}"
+        kubectl -n agentgateway-system create secret generic llm-openai-key --from-literal=Authorization="${OPENAI_KEY}" --dry-run=client -o yaml | kubectl apply -f -
+        kubectl -n agentgateway-system create secret generic llm-local-key --from-literal=Authorization="${VLLM_API_KEY:-unset}" --dry-run=client -o yaml | kubectl apply -f -
+        URL=$(task -d {{.TASKFILE_DIR}} inference:url 2>/dev/null || echo "http://127.0.0.1:${VLLM_PORT:-8000}/v1")
+        HOST=$(echo "$URL" | sed -E 's#^https?://([^:/]+).*#\1#')
+        sed "s#__VLLM_HOST__#${HOST}#; s#__VLLM_PORT__#${VLLM_PORT:-8000}#; s#__VLLM_MODEL__#${VLLM_MODEL:-unset}#" {{.TASKFILE_DIR}}/oss/llm-gateway/llm-gateway.yaml | kubectl apply -f -
+
+  agentregistry:install:
+    desc: "Install agentregistry, a catalog for MCP servers and agents (optional). Pinned chart; writes limited to its own namespace"
+    cmds:
+      - |
+        helm upgrade --install agentregistry oci://ghcr.io/agentregistry-dev/agentregistry/charts/agentregistry \
+          --version 0.4.0 -n agentregistry --create-namespace --set 'rbac.watchedNamespaces={agentregistry}' --wait --timeout 5m
+
+  agentregistry:apply:
+    desc: "Register the travel desk's MCP servers and agents in agentregistry (re-run after the registry restarts: its bundled database is dev-only)"
+    cmds:
+      - |
+        kubectl -n agentregistry port-forward svc/agentregistry 12122:12121 >/dev/null 2>&1 &
+        PF=$!
+        trap "kill $PF 2>/dev/null" EXIT
+        for i in $(seq 1 20); do curl -sf http://127.0.0.1:12122/v0/health >/dev/null && break; sleep 1; done
+        curl -sf -X POST http://127.0.0.1:12122/v0/apply -H "Content-Type: application/yaml" \
+          --data-binary @{{.TASKFILE_DIR}}/oss/agentregistry/catalog.yaml | jq -r '.results[] | "\(.kind) \(.name): \(.status) \(.error // "")"'
+
+  agentregistry:ui:
+    desc: "Open the agentregistry web UI on http://localhost:12121 (blocking port-forward)"
+    cmds:
+      - kubectl -n agentregistry port-forward svc/agentregistry 12121:12121
+
+  desk:llm:
+    desc: "Point the desk at an LLM path: `task desk:llm -- gateway` (agentgateway, OpenAI), `-- gateway-local` (agentgateway, vLLM) or `-- litellm`"
+    cmds:
+      - |
+        case "{{.CLI_ARGS}}" in
+          gateway)       URL=http://agentgateway.lab/llm/openai/v1 ;;
+          gateway-local) URL=http://agentgateway.lab/llm/local/v1 ;;
+          litellm)       URL=http://litellm.litellm.svc.cluster.local:4000/v1 ;;
+          *) echo "usage: task desk:llm -- gateway | gateway-local | litellm"; exit 1 ;;
+        esac
+        kubectl set env deploy --all -n travel-desk LITELLM_BASE_URL="$URL"
+
       - kubectl delete -f {{.TASKFILE_DIR}}/oss/kafka/ || true
       - kubectl delete -f {{.TASKFILE_DIR}}/oss/agentgateway/ || true
       - kubectl delete -f {{.TASKFILE_DIR}}/oss/traefik/ || true

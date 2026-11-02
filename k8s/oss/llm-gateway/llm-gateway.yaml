@@ -1,0 +1,147 @@
+# LLM traffic through agentgateway (an alternative to LiteLLM): one backend per model, one route per backend.
+#
+#   http://agentgateway.lab/llm/openai/v1/chat/completions   -> OpenAI chat   (model forced to gpt-4o-mini)
+#   http://agentgateway.lab/llm/openai/v1/embeddings         -> OpenAI embeddings (model forced to text-embedding-3-small)
+#   http://agentgateway.lab/llm/local/v1/chat/completions    -> vLLM on the Mac (model forced to the one it serves)
+#
+# Clients keep using an OpenAI client with base_url=http://agentgateway.lab/llm/<backend>/v1. The `model` they send is
+# replaced by the backend's model, which is the "alias" mechanism, and the gateway adds the provider's API key, so clients
+# never hold it. Apply with `task llm-gateway:apply` (it creates the secrets and fills in the placeholders); switch the desk with `task desk:llm -- gateway`.
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: llm-openai-chat
+  namespace: agentgateway-system
+spec:
+  ai:
+    provider:
+      openai:
+        model: gpt-4o-mini
+  policies:
+    auth:
+      secretRef:
+        name: llm-openai-key
+    ai:
+      routes:
+        "/v1/chat/completions": Completions
+        "/v1/models": Models
+      # What LiteLLM does not give this lab: guardrails in the gateway, before a prompt reaches a provider.
+      promptGuard:
+        request:
+          - regex:
+              action: Reject
+              matches:
+                - "(?i)ignore (all |your )?(previous |prior )?instructions"
+            response:
+              message: "Blocked by the gateway: looks like a prompt-injection attempt."
+              statusCode: 403
+          - regex:
+              action: Mask            # personal data is replaced before the model sees it
+              builtins: [CreditCard, Ssn, Email]
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: llm-openai-embeddings
+  namespace: agentgateway-system
+spec:
+  ai:
+    provider:
+      openai:
+        model: text-embedding-3-small
+  policies:
+    auth:
+      secretRef:
+        name: llm-openai-key
+    ai:
+      routes:
+        "/v1/embeddings": Embeddings
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: llm-local
+  namespace: agentgateway-system
+spec:
+  ai:
+    provider:
+      host: __VLLM_HOST__          # the Mac as the cluster sees it (`task inference:url`); filled in by `task llm-gateway:apply`
+      port: __VLLM_PORT__
+      openai:
+        model: __VLLM_MODEL__
+  policies:
+    auth:
+      secretRef:
+        name: llm-local-key
+    ai:
+      routes:
+        "/v1/chat/completions": Completions
+        "/v1/models": Models
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: llm-openai
+  namespace: agentgateway-system
+spec:
+  parentRefs:
+    - name: agentgateway-proxy
+      sectionName: http
+  hostnames:
+    - agentgateway.lab
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /llm/openai/v1/embeddings
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /v1/embeddings
+      backendRefs:
+        - name: llm-openai-embeddings
+          group: agentgateway.dev
+          kind: AgentgatewayBackend
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /llm/openai
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /
+      backendRefs:
+        - name: llm-openai-chat
+          group: agentgateway.dev
+          kind: AgentgatewayBackend
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: llm-local
+  namespace: agentgateway-system
+spec:
+  parentRefs:
+    - name: agentgateway-proxy
+      sectionName: http
+  hostnames:
+    - agentgateway.lab
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /llm/local
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /
+      backendRefs:
+        - name: llm-local
+          group: agentgateway.dev
+          kind: AgentgatewayBackend

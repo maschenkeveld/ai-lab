@@ -157,6 +157,14 @@ Master key is `sk-ai-lab-litellm` (hardcoded for local demo). Change it via `tas
 Every agent reaches models through Pydantic AI's OpenAI-compatible model (`LITELLM_BASE_URL=http://litellm.litellm.svc.cluster.local:4000/v1`, alias from `LITELLM_MODEL`, default `openai-gpt`); `destination-scout` also uses `embedding-openai` for ranking.
 
 ### The travel desk (`applications/agents/travel-desk/`)
+### LLM through agentgateway (`k8s/oss/llm-gateway/`, optional)
+
+An alternative to LiteLLM, applied with `task llm-gateway:apply` (it creates the `llm-openai-key` and `llm-local-key` Secrets from `.env` and fills the `__VLLM_*__` placeholders; keep the file out of `k8s/oss/routes/`, which `oss:manifests-apply` applies raw). One `AgentgatewayBackend` per model with `spec.ai.provider.openai.model` forcing the upstream model (the alias mechanism: routing is by URL, not by the body's `model`), `spec.policies.auth.secretRef` holding the key, and `spec.policies.ai.routes` mapping path suffixes to route types (`Completions`, `Embeddings`, `Models`, ...); an `HTTPRoute` per backend rewrites `/llm/<name>` to `/`. `spec.policies.ai.promptGuard.request` holds the guardrails (regex `Reject` / `Mask`, built-ins `CreditCard`, `Ssn`, `Email`). Switch the desk with `task desk:llm -- gateway | gateway-local | litellm` (it sets `LITELLM_BASE_URL`; `task oss:desk-apply` resets it to LiteLLM). The guard also blocks hostile inputs in the evals (the extraction suite's `prompt-injection` case returns a 403 through the gateway).
+
+### Agent registry (`k8s/oss/agentregistry/`, optional)
+
+agentregistry v0.4.0 (a catalog, not a gateway), installed with `task agentregistry:install` (pinned chart, `rbac.watchedNamespaces={agentregistry}` so its write access stays in its namespace; the default is a cluster-wide ClusterRole with write on Secrets). `catalog.yaml` is a multi-document `ar.dev/v1alpha1` stream applied with `POST /v0/apply` (`task agentregistry:apply`): `MCPServer` with `spec.remote.{type: streamable-http, url}` pointing at the gateway routes, and `Agent` with `spec.source.{image, protocol: A2A}`, `modelProvider/modelName`, `mcpServers` references and the A2A card URL in an annotation. When adding an MCP server or agent to the desk, add it to the catalog too. Quote descriptions in the YAML (a `": "` inside breaks it). The API is described at `/openapi.json`; resources are `agents`, `mcpservers`, `models`, `skills`, `prompts`, `plugins`, `deployments`, `runtimes`. Do not use its deploy features without kagent, which this lab does not run.
+
 
 Each project is a uv project (`pyproject.toml` + `uv.lock`) with an editable path dependency on `common/` (package `travel_common`). Docker build context is `applications/agents/travel-desk`; images are `travel-desk-<name>`. Unit tests: `cd applications/agents/travel-desk/<project> && uv run pytest` (the coordinator's and fare-watcher's tests start a Postgres in Docker; they skip without it).
 

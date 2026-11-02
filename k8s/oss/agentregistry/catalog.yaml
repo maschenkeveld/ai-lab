@@ -1,0 +1,133 @@
+# The travel desk's catalog for agentregistry: its MCP servers and agents.
+# Apply with `task agentregistry:apply` (the registry must be installed: `task agentregistry:install`).
+apiVersion: ar.dev/v1alpha1
+kind: MCPServer
+metadata:
+  name: mcp-travel-search
+  tag: latest
+  labels:
+    app: travel-desk
+spec:
+  title: "Travel search"
+  description: "Destinations and flight fares (list_destinations, shortlist_destinations, get_destination, list_airports, flight_price). Read-only."
+  remote:
+    type: streamable-http
+    url: http://agentgateway.lab/mcp-travel-search
+---
+apiVersion: ar.dev/v1alpha1
+kind: MCPServer
+metadata:
+  name: mcp-bookings
+  tag: latest
+  labels:
+    app: travel-desk
+spec:
+  title: "Bookings"
+  description: "The booking saga as tools: hold_booking, confirm_booking, cancel_booking, get_booking, list_bookings. Writes: it moves money."
+  remote:
+    type: streamable-http
+    url: http://agentgateway.lab/mcp-bookings
+---
+apiVersion: ar.dev/v1alpha1
+kind: Agent
+metadata:
+  name: trip-coordinator
+  tag: latest
+  labels:
+    app: travel-desk
+  annotations:
+    a2a.agent-card: http://agentgateway.lab/a2a/trip-coordinator/.well-known/agent-card.json
+spec:
+  title: "Trip coordinator"
+  description: "Coordinates a trip end to end: researches and holds a flight, gets human approval under a price policy, books it, then watches the fare. A durable workflow in Postgres."
+  source:
+    image: travel-desk-coordinator:latest
+    protocol: A2A
+  modelProvider: openai
+  modelName: openai-gpt
+---
+apiVersion: ar.dev/v1alpha1
+kind: Agent
+metadata:
+  name: destination-scout
+  tag: latest
+  labels:
+    app: travel-desk
+  annotations:
+    a2a.agent-card: http://agentgateway.lab/a2a/destination-scout/.well-known/agent-card.json
+spec:
+  title: "Destination scout"
+  description: "Shortlists destinations for a trip request and ranks them by embedding similarity, with reasoning. Tool facts are restored by an output validator."
+  source:
+    image: travel-desk-destination-scout:latest
+    protocol: A2A
+  modelProvider: openai
+  modelName: openai-gpt
+  mcpServers:
+    - kind: MCPServer
+      name: mcp-travel-search
+      tag: latest
+---
+apiVersion: ar.dev/v1alpha1
+kind: Agent
+metadata:
+  name: flight-scout
+  tag: latest
+  labels:
+    app: travel-desk
+  annotations:
+    a2a.agent-card: http://agentgateway.lab/a2a/flight-scout/.well-known/agent-card.json
+spec:
+  title: "Flight scout"
+  description: "Quotes a route across several candidate dates and recommends one. Prices come from the tool; the model only recommends."
+  source:
+    image: travel-desk-flight-scout:latest
+    protocol: A2A
+  modelProvider: openai
+  modelName: openai-gpt
+  mcpServers:
+    - kind: MCPServer
+      name: mcp-travel-search
+      tag: latest
+---
+apiVersion: ar.dev/v1alpha1
+kind: Agent
+metadata:
+  name: booking-agent
+  tag: latest
+  labels:
+    app: travel-desk
+  annotations:
+    a2a.agent-card: http://agentgateway.lab/a2a/booking-agent/.well-known/agent-card.json
+spec:
+  title: "Booking agent"
+  description: "Holds, confirms and cancels bookings. Deterministic: it has no LLM, because it moves money."
+  source:
+    image: travel-desk-booking-agent:latest
+    protocol: A2A
+  mcpServers:
+    - kind: MCPServer
+      name: mcp-bookings
+      tag: latest
+---
+apiVersion: ar.dev/v1alpha1
+kind: Agent
+metadata:
+  name: fare-watcher
+  tag: latest
+  labels:
+    app: travel-desk
+  annotations:
+    a2a.agent-card: http://agentgateway.lab/a2a/fare-watcher/.well-known/agent-card.json
+spec:
+  title: "Fare watcher"
+  description: "A long-running agent: a durable workflow per booking re-quotes the fare and tells the coordinator about meaningful drops."
+  source:
+    image: travel-desk-fare-watcher:latest
+    protocol: A2A
+  modelProvider: openai
+  modelName: openai-gpt
+  mcpServers:
+    - kind: MCPServer
+      name: mcp-travel-search
+      tag: latest
