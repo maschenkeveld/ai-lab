@@ -13,7 +13,7 @@ A runnable reference for agentic AI on open-source infrastructure, for demos and
 Build and maintain a local OSS AI lab using:
 
 - **Traefik OSS**: Kubernetes Gateway API HTTP routing for REST APIs
-- **LiteLLM Proxy**: OpenAI-compatible LLM gateway (multi-provider, key auth), including a local model served by vLLM-Metal
+- **agentgateway (LLM routes)**: the only LLM gateway: OpenAI, Gemini, Ollama and a local vLLM-Metal model, with a client key and guardrails
 - **agentgateway**: MCP tool routing and A2A agent-to-agent traffic
 - **Python + Pydantic AI + FastA2A + DBOS**: the travel desk, a durable multi-agent workflow with human approval
 - **FastMCP**: thin Python adapters that expose Go REST APIs as MCP tools
@@ -45,7 +45,7 @@ task build                    # rebuild all local images
 task oss:manifests-apply      # reapply gateway/desk/LLM config (fast iteration)
 task build:desk               # rebuild only the 5 desk agent images
 task oss:desk-apply           # redeploy + restart only the desk
-task desk:model -- local-vllm # point the desk agents at another LiteLLM alias
+task desk:llm -- gemini       # point the desk agents at another model (the route picks it)
 task keycloak:reimport        # re-import the Keycloak realm after editing it (dev only)
 task eval                     # evals against the live lab
 task hosts:apply              # update Mac /etc/hosts
@@ -91,8 +91,8 @@ k8s/
   oss/
     agentgateway/                   Gateway `agentgateway-proxy` (GatewayClass: agentgateway)
     kafka/                          Direct external Kafka listener
-    litellm/                        LiteLLM Deployment, ConfigMap, Service
-    routes/                         HTTPRoutes: rest-apis, travel-desk, mcp-servers, litellm
+    llm-gateway/                    LLM backends, routes, guardrails and client-key policies (agentgateway)
+    routes/                         HTTPRoutes: rest-apis, travel-desk, mcp-servers
     travel-desk/                    Desk Deployments, Services, Postgres (namespace travel-desk)
     traefik/                        Traefik Gateway CRD
 ```
@@ -141,25 +141,18 @@ A2A and web routes use plain `HTTPRoute` (Gateway API v1) pointing at the `agent
 
 The agentgateway Gateway CRD is at `k8s/oss/agentgateway/gateway.yaml`. The MetalLB IP is pinned in the Helm values.
 
-### LiteLLM config (`k8s/oss/litellm/config.yaml`)
+### LLM gateway (`k8s/oss/llm-gateway/llm-gateway.yaml`)
 
-Stored as a ConfigMap mounted into the LiteLLM pod. Model aliases:
+All model calls go through agentgateway; LiteLLM has been removed. `task llm-gateway:apply` (part of `oss:manifests-apply`, so `task up`) fills the `__VLLM_*__` placeholders and applies it; `task secrets:llm-gateway` creates the Secrets. **Keep the file out of `k8s/oss/routes/`**, which `oss:manifests-apply` applies raw.
 
-| Alias | Backend |
-|---|---|
-| `openai-gpt` | `openai/gpt-4o-mini` |
-| `gemini-pro` | `gemini/gemini-2.5-pro` |
-| `ollama-llama` | `ollama_chat/llama3.2` via in-cluster Ollama |
-| `local-vllm` | vLLM-Metal on the Mac host (`VLLM_BASE_URL`, `VLLM_API_KEY`, `VLLM_BACKEND_MODEL` from the `litellm-env` Secret) |
-| `embedding-openai` | `openai/text-embedding-3-small` |
+- One `AgentgatewayBackend` per model: `llm-openai-chat` (gpt-4o-mini), `llm-openai-embeddings` (text-embedding-3-small), `llm-gemini` (gemini-2.5-pro), `llm-ollama` (llama3.2 on the Mac, via the in-cluster `ollama` Service), `llm-local` (whatever vLLM serves). `spec.ai.provider.<provider>.model` forces the upstream model, which is the alias mechanism: **routing is by URL, not by the body's `model` field**. `spec.policies.auth.secretRef` holds the provider key; `spec.policies.ai.routes` maps path suffixes to route types (`Completions`, `Embeddings`, `Models`).
+- An `HTTPRoute` per provider rewrites `/llm/<provider>` to `/`: `/llm/openai/v1/embeddings` goes to the embeddings backend, the rest of `/llm/openai` to chat.
+- Every chat backend carries `spec.policies.ai.promptGuard.request`: a regex `Reject` for prompt-injection phrases (403) and a `Mask` of the built-ins `CreditCard`, `Ssn`, `Email`.
+- An `AgentgatewayPolicy` per route (`llm-<provider>-auth`; a policy targets one object) requires a client key from the Secret `llm-gateway-client-keys` (`traffic.apiKeyAuthentication`, strict). The client key is `LLM_GATEWAY_KEY` in `.env` (default `sk-ai-lab-gateway`); it is also copied to the Secret `llm-client-key` in `travel-desk`, which the agents read as `LLM_API_KEY`. The backend's own auth then swaps in the provider's key, so clients never hold one.
 
-Master key is `sk-ai-lab-litellm` (hardcoded for local demo). Change it via `task secrets:litellm` (sourced from `.env`) or the `litellm-env` Secret directly. To add a model: add a `model_list` entry to the ConfigMap and run `task oss:manifests-apply`.
+**Settings every client reads** (`common/travel_common/model.py`, and each example's `common.py`): `LLM_BASE_URL` (a route, default `http://agentgateway.lab/llm/openai/v1`), `LLM_API_KEY` (the client key), `LLM_MODEL` (a label for traces; the gateway overrides the real model), `LLM_EMBEDDINGS_BASE_URL` (embeddings only exist on the OpenAI route, so they are separate) and `LLM_EMBEDDING_MODEL`. Change the desk's model with `task desk:llm -- openai | gemini | ollama | local` (it sets `LLM_BASE_URL` and `LLM_MODEL`; `task oss:desk-apply` resets them to the manifest's OpenAI default).
 
-Every agent reaches models through Pydantic AI's OpenAI-compatible model (`LITELLM_BASE_URL=http://litellm.litellm.svc.cluster.local:4000/v1`, alias from `LITELLM_MODEL`, default `openai-gpt`); `destination-scout` also uses `embedding-openai` for ranking.
-
-### LLM through agentgateway (`k8s/oss/llm-gateway/`, optional)
-
-An alternative to LiteLLM, applied with `task llm-gateway:apply` (it creates the `llm-openai-key` and `llm-local-key` Secrets from `.env` and fills the `__VLLM_*__` placeholders; keep the file out of `k8s/oss/routes/`, which `oss:manifests-apply` applies raw). One `AgentgatewayBackend` per model with `spec.ai.provider.openai.model` forcing the upstream model (the alias mechanism: routing is by URL, not by the body's `model`), `spec.policies.auth.secretRef` holding the key, and `spec.policies.ai.routes` mapping path suffixes to route types (`Completions`, `Embeddings`, `Models`, ...); an `HTTPRoute` per backend rewrites `/llm/<name>` to `/`. `spec.policies.ai.promptGuard.request` holds the guardrails (regex `Reject` / `Mask`, built-ins `CreditCard`, `Ssn`, `Email`). Switch the desk with `task desk:llm -- gateway | gateway-local | litellm` (it sets `LITELLM_BASE_URL`; `task oss:desk-apply` resets it to LiteLLM). The guard also blocks hostile inputs in the evals (the extraction suite's `prompt-injection` case returns a 403 through the gateway).
+Tested: OpenAI chat, streaming and embeddings; Gemini; the local vLLM route; key enforcement (401); both guardrails; the desk's evals through it. **Not tested:** Ollama end to end, failover groups, per-client token budgets (they need a global rate-limit service, not deployed), several client keys, Keycloak tokens on these routes. The guard also blocks hostile inputs in the evals: the extraction suite's `prompt-injection` case returns a 403 through the gateway, which the eval accepts as a pass (`blocked_by_gateway`).
 
 ### Agent registry (`k8s/oss/agentregistry/`, optional)
 
@@ -203,7 +196,7 @@ task oss:desk-apply                # apply manifests + rollout restart
 ```
 `kubectl apply` of a manifest that contains `__OTEL_ENDPOINT__` must go through the Taskfile (it substitutes the endpoint); applying it raw points the pod at a nonexistent host.
 
-**Evals** (`applications/agents/travel-desk/evals/`, pydantic-evals): `cd k8s && task eval`. The `extraction` suite scores how a model reads trip requests (`-- --suite extraction --model local-vllm` to compare models); the `desk` suite creates real trips, applies a human decision and checks policy, outcome, hold release and audit trail.
+**Evals** (`applications/agents/travel-desk/evals/`, pydantic-evals): `cd k8s && task eval`. The `extraction` suite scores how a model reads trip requests (`-- --suite extraction --llm gemini` to compare models); the `desk` suite creates real trips, applies a human decision and checks policy, outcome, hold release and audit trail.
 
 **The terminal client** `desk_cli.py` drives the REST API (`new`, `inbox`, `approve`, `reject`, `edit`, `cancel`, `drop`, `show`, `demo`).
 
@@ -226,7 +219,7 @@ The Go toolchain is not required locally: build through Docker (`task build:rest
 
 ### Local inference (`inference/`, `llm/`)
 
-vLLM-Metal serves a model on the Mac GPU: `task inference:install`, `task inference:run`, `task inference:check` (from `k8s/`). It is exposed as the `local-vllm` LiteLLM alias (the secret gets the host URL from `task inference:url`). Use Qwen2.5-14B-Instruct 4-bit with `VLLM_TOOL_PARSER=hermes` and `llm/qwen25-chat-template.jinja`. Mistral-7B-Instruct-v0.3 with the `mistral` parser returns tool calls as plain text and never stops, so tool-calling agents hang on it.
+vLLM-Metal serves a model on the Mac GPU: `task inference:install`, `task inference:run`, `task inference:check` (from `k8s/`). It is the gateway's `/llm/local` route (`task llm-gateway:apply` takes the host address from `task inference:url`), selectable with `task desk:llm -- local`. Use Qwen2.5-14B-Instruct 4-bit with `VLLM_TOOL_PARSER=hermes` and `llm/qwen25-chat-template.jinja`. Mistral-7B-Instruct-v0.3 with the `mistral` parser returns tool calls as plain text and never stops, so tool-calling agents hang on it.
 
 ### Standalone examples (`agentic-examples/`)
 
@@ -240,16 +233,16 @@ model and tracing). Keep it that way: an example you can copy out and break is t
 - `a2a_pair`: a FastA2A server and an agent whose tool is an A2A call (send, poll, read)
 - `durable_approval`: a DBOS workflow on SQLite with a durable `recv`; `kill -9` and resume. DBOS runs steps in threads, so patch module-level functions in tests rather than using `agent.override`
 
-Default model is `openai-gpt` via LiteLLM; `task run:local` uses vLLM on the Mac; `LLM_BASE_URL`/`LLM_API_KEY`/`LLM_MODEL` select anything OpenAI-compatible. Traces go to LGTM when `OTEL_EXPORTER_OTLP_ENDPOINT=http://grafana.lab:4318` is set. Run an example's tests with `cd agentic-examples/<folder> && task test`.
+Default model is OpenAI's gpt-4o-mini through the gateway (`--llm gemini|ollama|local` picks another route); `task run:local` uses vLLM on the Mac directly; `LLM_BASE_URL`/`LLM_API_KEY`/`LLM_MODEL` select anything OpenAI-compatible. Traces go to LGTM when `OTEL_EXPORTER_OTLP_ENDPOINT=http://grafana.lab:4318` is set. Run an example's tests with `cd agentic-examples/<folder> && task test`.
 
 ---
 
 ## Conventions
 
-- Use `.lab` hostnames everywhere: `traefik-api-gw.lab`, `litellm.lab`, `agentgateway.lab`, `keycloak.lab:8080`, `grafana.lab:3000`. They resolve in-cluster (CoreDNS rewrite) and on Mac (`/etc/hosts`). Never hardcode `172.18.x.x` IPs.
+- Use `.lab` hostnames everywhere: `traefik-api-gw.lab`, `agentgateway.lab`, `keycloak.lab:8080`, `grafana.lab:3000`. They resolve in-cluster (CoreDNS rewrite) and on Mac (`/etc/hosts`). Never hardcode `172.18.x.x` IPs.
 - Traefik routes go in `k8s/oss/routes/rest-apis.yaml` and use `GatewayClass: traefik`.
 - agentgateway routes go in `k8s/oss/routes/travel-desk.yaml` (HTTPRoute) and `k8s/oss/routes/mcp-servers.yaml` (AgentgatewayBackend + HTTPRoute). Both use `GatewayClass: agentgateway`.
-- LiteLLM config lives in `k8s/oss/litellm/config.yaml` as a ConfigMap.
+- LLM gateway config lives in `k8s/oss/llm-gateway/llm-gateway.yaml` (backends, routes, guardrails, client-key policies).
 - Desk k8s resources live in `k8s/oss/travel-desk/`; desk source in `applications/agents/travel-desk/`; MCP adapter source in `applications/mcp-servers/`.
 - Reusable application code belongs in `applications/`, not in `k8s/`.
 - Do not put route auth config in this repo; there is none.
@@ -265,7 +258,6 @@ LGTM stack at `grafana.lab:3000` (admin/admin). Receives OTLP push on port 4318;
 - Desk agents (all 5) and the MCP adapters: OTEL traces + logs + metrics via OTLP (`setup_otel` in `common/travel_common/otel.py`: Starlette + httpx + Pydantic AI instrumentation). Trace context propagates across every A2A hop and into the REST servers, so a trip's research is one trace tree. An approval is a separate trace (it starts when a human decides).
 
 **What's not wired (gap vs Kong AI Lab):**
-- LiteLLM: Prometheus `/metrics` endpoint, not pushed to LGTM
 - agentgateway: stdout logs only
 
 To view what's in Grafana: Explore → Tempo (traces), Explore → Loki (logs from all components).
@@ -285,7 +277,7 @@ task oss:manifests-apply      # Reapply all OSS overlays (gateway config, desk, 
 task build:desk               # Rebuild the 5 desk agent images
 task oss:desk-apply           # Redeploy + restart the desk
 task manifests:apply          # Reapply base manifests (kafka, otel-lgtm, REST servers, MCP servers)
-task desk:model -- <alias>    # Point the desk at another LiteLLM alias
+task desk:llm -- <route>      # Point the desk at another model: openai | gemini | ollama | local
 task eval                     # Run the evals against the live lab
 
 # Local model

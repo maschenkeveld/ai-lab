@@ -25,9 +25,9 @@ A runnable reference for agentic AI on open-source infrastructure, small enough 
 - **Show agent-to-agent (A2A) working end to end.** Five separate agents coordinate a trip over the open A2A protocol, use tools over MCP, and call models through an OpenAI-compatible gateway, with every hop routed by agentgateway.
 - **Give Field Engineers and SAs a proven baseline** for customer conversations about AI gateways, so an engagement starts from a working setup instead of a blank page.
 - **Support a side-by-side comparison with the Kong AI Lab.** It is built from the same kinds of parts (HTTP, LLM, MCP and A2A gateways, REST backends, analytics), so differences in routing, auth, observability and agent tooling can be shown rather than described (see [Capability comparison](#capability-comparison-with-kong-ai-lab)).
-- **Stay vendor-neutral.** Pydantic AI (MIT), A2A and MCP are open standards; nothing here needs a proprietary component, and any OpenAI-compatible model works through LiteLLM.
+- **Stay vendor-neutral.** Pydantic AI (MIT), A2A and MCP are open standards; nothing here needs a proprietary component, and any OpenAI-compatible model works through the LLM gateway.
 
-It is a lab, not a product: routes are unauthenticated and the cluster is throwaway. Start with `DEMO.md` to present it and `TESTS.md` to verify it.
+It is a lab, not a product: most routes are unauthenticated (the LLM routes need a client key, the desk's REST API needs sign-in) and the cluster is throwaway. Start with `DEMO.md` to present it and `TESTS.md` to verify it.
 
 ---
 
@@ -39,10 +39,8 @@ Client / browser
   ├── traefik-api-gw.lab ──► Traefik OSS (Kubernetes Gateway API)
   │     └── /flights, /destinations, /book-flights ──► Go REST servers
   │
-  ├── litellm.lab ──► LiteLLM Proxy
-  │     └── /v1/chat/completions ──► OpenAI / Gemini / Ollama / local vLLM on the Mac
-  │
   └── agentgateway.lab ──► agentgateway
+        ├── /llm/{openai,gemini,ollama,local}/v1 ──► OpenAI / Gemini / Ollama / vLLM on the Mac (client key, guardrails)
         ├── /desk/                      ──► the web app and REST API (coordinator)
         ├── /a2a/trip-coordinator       ──► coordinator   (4300)  durable workflow + approvals, Postgres
         │     ├── /a2a/destination-scout ──► destination-scout (4301)  LLM: shortlist and rank
@@ -63,35 +61,28 @@ Traefik OSS with Kubernetes Gateway API (`GatewayClass: traefik`). Routes all RE
 
 No auth enforcement; routes are open. Traefik does URL-prefix rewriting so `/flights` → `/` on the backend.
 
-### LiteLLM: LLM gateway
+### LLM gateway (agentgateway)
 
-OpenAI-compatible API proxy at `litellm.lab`. Aliases:
+Every model call goes through agentgateway; there is no separate LLM proxy. `task llm-gateway:apply` (part of `task up`) creates a backend per model and a route per backend (`k8s/oss/llm-gateway/llm-gateway.yaml`).
 
-| Model alias | Backend | API key |
+| Base URL | Model | Provider key |
 |---|---|---|
-| `openai-gpt` | `gpt-4o-mini` | `OPENAI_API_KEY` |
-| `gemini-pro` | `gemini-2.5-pro` | `GEMINI_API_KEY` |
-| `ollama-llama` | `llama3.2` via Ollama | None (in-cluster) |
-| `local-vllm` | the model served by vLLM-Metal on your Mac (see [Local inference](#local-inference)) | `VLLM_API_KEY` |
-| `embedding-openai` | `text-embedding-3-small` | `OPENAI_API_KEY` |
+| `http://agentgateway.lab/llm/openai/v1` | `gpt-4o-mini` chat, `text-embedding-3-small` embeddings | `OPENAI_KEY` |
+| `http://agentgateway.lab/llm/gemini/v1` | `gemini-2.5-pro` | `GEMINI_KEY` |
+| `http://agentgateway.lab/llm/ollama/v1` | `llama3.2` on Ollama on your Mac | none |
+| `http://agentgateway.lab/llm/local/v1` | the model vLLM-Metal serves on your Mac (see [Local inference](#local-inference)) | `VLLM_API_KEY` |
 
-Auth via master key (`sk-ai-lab-litellm`). Config lives in `k8s/oss/litellm/config.yaml`.
+Use any OpenAI client with one of those as `base_url` and `Authorization: Bearer <LLM_GATEWAY_KEY>` (default `sk-ai-lab-gateway`, set in `.env`). The gateway:
+- **chooses the model by route** and replaces whatever `model` the client sends, so the agents just change a base URL (`task desk:llm -- gemini`);
+- **holds the provider keys**, so clients, agents and the examples never see them, and **requires a client key** on every route (no key or a wrong key is a 401);
+- **runs guardrails before a prompt reaches a provider**: a prompt-injection phrase is rejected with a 403, and emails, card numbers and SSNs are masked before the model sees them;
+- logs every call with standard `gen_ai.*` attributes, supports a request rate limit (429 once exceeded), streaming and embeddings.
 
-LiteLLM covers multi-provider routing, model aliasing, and an OpenAI-compatible API surface. It does not have, compared with Kong's LLM gateway: semantic routing, an AI semantic cache, prompt/response guardrails, per-consumer rate limiting, RAG injection, or token-budget enforcement.
+Tested in this lab: OpenAI chat, streaming and embeddings; Gemini (the gateway translates the OpenAI-style request); the local vLLM route; key enforcement; both guardrails; and the whole travel desk through it (live evals 100%, about 23 seconds a trip). **Not tested:** Ollama end to end (the Mac was not running it: the request reaches it and is refused there), failover between providers, per-client token budgets (those need the gateway's global rate-limit service, which is not deployed), several client keys (the Secret supports them, with metadata per key), and Keycloak tokens on these routes instead of a shared key.
 
-### LLM through agentgateway (optional, an alternative to LiteLLM)
+One Gemini note: `gemini-2.5-pro` is a reasoning model, and hidden reasoning counts against `max_tokens`, so a small cap (60 or 200 in testing) returns an empty answer with `finish_reason: length`; leave it off or use 1000 or more.
 
-agentgateway can carry LLM traffic too, so one gateway serves LLM, MCP and A2A. `cd k8s && task llm-gateway:apply` adds a backend per model and a route per backend (`k8s/oss/llm-gateway/llm-gateway.yaml`), and `task desk:llm -- gateway` points the desk at it (`gateway-local` for the Mac's vLLM, `litellm` to go back).
-
-| Route | Backend |
-|---|---|
-| `agentgateway.lab/llm/openai/v1/chat/completions` | OpenAI chat; the `model` a client sends is replaced by `gpt-4o-mini` |
-| `agentgateway.lab/llm/openai/v1/embeddings` | OpenAI embeddings (`text-embedding-3-small`) |
-| `agentgateway.lab/llm/local/v1/chat/completions` | vLLM-Metal on the Mac; `model` replaced by the one it serves |
-
-Tried against this lab: chat, streaming, embeddings and local vLLM all work, and the full desk passes its live end-to-end evals through it at the same speed (about 22s a trip). The gateway holds the provider key (clients send none that matters), logs every call with standard `gen_ai.*` attributes, and enforces **guardrails before a prompt reaches a provider**: the OpenAI chat backend rejects prompt-injection phrases with a 403 and masks emails, card numbers and SSNs. A local request limit returns 429 once exceeded.
-
-What it does not do, or does differently from LiteLLM: a model is chosen by *route*, not by the `model` field in the body (switching models means changing the base URL); there is no `/v1/models` listing (501); token budgets per client need its global rate-limit service, which is not deployed here (only per-gateway request limits were tested); Gemini and Ollama backends are not set up (the provider support exists); and the local vLLM route has no embeddings endpoint, so `destination-scout` falls back to keyword ranking there. LiteLLM stays the default; this is the path to show when the point is "one gateway for everything".
+This replaced LiteLLM. Differences worth knowing: the model is chosen by route, not by the request body's `model` field; there is no `/v1/models` listing (501); there are no virtual keys, spend tracking, admin UI or response cache; and the providers are OpenAI, Anthropic, Gemini, Vertex, Bedrock, Azure and any OpenAI-compatible endpoint, not LiteLLM's hundred-plus.
 
 ### agentgateway: MCP and A2A
 
@@ -208,15 +199,15 @@ a kill while it waits for a person) and `pydantic_model` (typed output and evals
 
 ### Local inference
 
-vLLM-Metal can serve a model on your Mac's GPU, exposed to the cluster as the `local-vllm` alias:
+vLLM-Metal can serve a model on your Mac's GPU, exposed to the cluster as the gateway's `/llm/local` route:
 
 ```bash
 cd k8s
 task inference:install     # once: vLLM-Metal via Homebrew (Apple Silicon)
 task inference:run         # blocking terminal: serves VLLM_MODEL from .env
 task inference:check       # model list plus a generation smoke test
-task secrets:litellm && kubectl -n litellm rollout restart deploy/litellm   # load the URL and key into LiteLLM
-task desk:model -- local-vllm    # point every desk agent at it (back: task desk:model -- openai-gpt)
+task secrets:llm-gateway && task llm-gateway:apply   # point the gateway's llm-local backend at it
+task desk:llm -- local           # point every desk agent at it (back: task desk:llm -- openai)
 ```
 
 Use **Qwen2.5-14B-Instruct 4-bit** with `VLLM_TOOL_PARSER=hermes` and `llm/qwen25-chat-template.jinja` (see `.env.example`). With Mistral-7B-Instruct-v0.3 and the `mistral` parser, vLLM returns tool calls as plain text and the model never stops, so tool-calling agents hang. The whole desk runs on Qwen2.5-14B, in roughly 85 seconds to reach the first approval against about 35 with OpenAI.
@@ -226,7 +217,7 @@ Use **Qwen2.5-14B-Instruct 4-bit** with `VLLM_TOOL_PARSER=hermes` and `llm/qwen2
 Identical to the Kong AI Lab. Kafka consumer → embedding → DBSCAN clustering → plugin recommendations → React UI.
 
 ```
-Kong LLM GW (kafka-log) or LiteLLM → Kafka topic: llm-usage
+Kong LLM GW (kafka-log) → Kafka topic: llm-usage
   → Ingestor (Python)
       generates sentence-transformer embeddings
       stores prompt + embedding + metadata in Postgres/pgvector
@@ -236,7 +227,7 @@ Kong LLM GW (kafka-log) or LiteLLM → Kafka topic: llm-usage
         → React UI at analytics.lab
 ```
 
-The analytics pipeline uses the `kafka-log` plugin output format — when used with LiteLLM, a custom log middleware would be needed to produce the same format.
+The pipeline expects the `kafka-log` plugin's output format, which comes from Kong's LLM gateway. **Nothing in this lab produces to the `llm-usage` topic** (agentgateway does not write to Kafka), so the pipeline is deployed but empty here: the topic does not exist and the database has no rows.
 
 ### Supporting services
 
@@ -260,13 +251,13 @@ All cluster operations are driven by `task` from the `k8s/` directory.
 | `task up` | Full setup: cluster → namespaces → build → secrets → helm → manifests → oss overlays → route → hosts |
 | `task down` | Deletes the Kind cluster (`ai-lab-oss`) |
 | `task build` | Builds and loads all custom Docker images into Kind |
-| `task secrets` | Creates the `keycloak-realm` and `litellm-env` k8s Secrets |
+| `task secrets` | Creates the Keycloak realm and LLM gateway secrets |
 | `task helm:install` | Installs MetalLB, Traefik, Keycloak, agentgateway |
 | `task manifests:apply` | Applies base manifests (Kafka, otel-lgtm, Postgres, REST servers, MCP servers, Ollama, etc.) |
-| `task oss:manifests-apply` | Applies Traefik routes, LiteLLM, agentgateway backends and the travel desk |
+| `task oss:manifests-apply` | Applies Traefik routes, the agentgateway backends (MCP and LLM) and the travel desk |
 | `task build:desk` / `task oss:desk-apply` | Rebuild the 5 desk agents / redeploy and restart them |
-| `task desk:model -- <alias>` | Point every desk agent at another LiteLLM alias |
-| `task llm-gateway:apply` / `task desk:llm -- gateway` | Optional LLM path through agentgateway, and switching the desk to it |
+| `task desk:llm -- openai\|gemini\|ollama\|local` | Point every desk agent at another model (the gateway route picks it) |
+| `task llm-gateway:apply` / `task secrets:llm-gateway` | Apply the LLM gateway's backends, routes and policies / create its secrets |
 | `task agentregistry:install` / `:apply` / `:ui` | Optional agent and MCP catalog (agentregistry) |
 | `task eval` | Run the desk evals against the live lab (`-- --suite extraction` for the model-only suite) |
 | `task inference:install/run/check` | Local vLLM on the Mac (see [Local inference](#local-inference)) |
@@ -322,10 +313,9 @@ All cluster operations are driven by `task` from the `k8s/` directory.
 │   └── oss/
 │       ├── agentgateway/                 # Gateway CRD (agentgateway-proxy)
 │       ├── kafka/                        # Direct external Kafka listener
-│       ├── litellm/                      # LiteLLM Deployment, ConfigMap, Service
-│       ├── llm-gateway/                  # optional: LLM backends and routes through agentgateway
+│       ├── llm-gateway/                  # LLM backends, routes, guardrails and client-key policies (agentgateway)
 │       ├── agentregistry/                # optional: the desk's catalog for agentregistry
-│       ├── routes/                       # HTTPRoutes (rest-apis, travel-desk, mcp-servers, litellm)
+│       ├── routes/                       # HTTPRoutes (rest-apis, travel-desk, mcp-servers)
 │       ├── travel-desk/                  # Desk Deployments, Services, and its Postgres
 │       └── traefik/                      # Traefik Gateway CRD
 │
@@ -346,10 +336,10 @@ All cluster operations are driven by `task` from the `k8s/` directory.
 | [Helm](https://helm.sh/) | |
 | [Task](https://taskfile.dev/) | |
 | [uv](https://docs.astral.sh/uv/) | Only to run the tests, evals and examples locally |
-| OpenAI API key | Needed for the agents (`openai-gpt`, `embedding-openai`). The cluster comes up without it |
+| OpenAI API key | Needed for the agents (chat and embeddings through the gateway's OpenAI route). The cluster comes up without it |
 | [vLLM-Metal](https://github.com/vllm-project/vllm-metal) | Optional: a local model on Apple Silicon via `task inference:install` |
 | Google Gemini API key | Optional |
-| [Ollama](https://ollama.com/) | Optional, only for the `ollama-llama` alias |
+| [Ollama](https://ollama.com/) | Optional, only for the gateway's `/llm/ollama` route |
 
 ### Step 1 — Start Colima
 
@@ -382,8 +372,7 @@ The `colima:route` step asks for your Mac password. When it finishes, open `http
 | Hostname | Service |
 |---|---|
 | `traefik-api-gw.lab` | Traefik — REST API routes (port 80) |
-| `litellm.lab` | LiteLLM Proxy (port 80, forwards to 4000) |
-| `agentgateway.lab` | agentgateway: MCP and A2A routes, and the travel desk web app at `/desk/` (port 80) |
+| `agentgateway.lab` | agentgateway: LLM (`/llm/...`), MCP and A2A routes, and the travel desk web app at `/desk/` (port 80) |
 | `kafka-direct.lab:9092` | Direct Kafka listener |
 | `keycloak.lab:8080` | Keycloak |
 | `analytics.lab` | LLM Analytics React dashboard |
@@ -402,27 +391,20 @@ Full scripts live in `DEMO.md`. Quick-start snippets below.
 ### LLM routing {#llm-routing-demo}
 
 ```bash
-# List available models
-curl -H "Authorization: Bearer sk-ai-lab-litellm" http://litellm.lab/v1/models | jq .
+K="Authorization: Bearer sk-ai-lab-gateway"; J="Content-Type: application/json"; B=http://agentgateway.lab/llm
 
-# Call OpenAI via LiteLLM
-curl http://litellm.lab/v1/chat/completions \
-  -H "Authorization: Bearer sk-ai-lab-litellm" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"openai-gpt","messages":[{"role":"user","content":"What is LiteLLM?"}]}' | jq .
+# The same request to three providers: only the route changes (the model name is ignored: the route picks it)
+for R in openai gemini local; do
+  echo -n "$R: "
+  curl -s $B/$R/v1/chat/completions -H "$K" -H "$J" \
+    -d '{"model":"x","max_tokens":60,"messages":[{"role":"user","content":"What does an API gateway do? Three words."}]}' | jq -r '.choices[0].message.content // .'
+done
 
-# Call Gemini via LiteLLM
-curl http://litellm.lab/v1/chat/completions \
-  -H "Authorization: Bearer sk-ai-lab-litellm" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"gemini-pro","messages":[{"role":"user","content":"What is LiteLLM?"}]}' | jq .
-
-# Call local Ollama via LiteLLM
-curl http://litellm.lab/v1/chat/completions \
-  -H "Authorization: Bearer sk-ai-lab-litellm" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"ollama-llama","messages":[{"role":"user","content":"What is LiteLLM?"}]}' | jq .
+# Without the client key the gateway refuses
+curl -s -o /dev/null -w "%{http_code}\n" $B/openai/v1/chat/completions -H "$J" -d '{"model":"x","messages":[{"role":"user","content":"hi"}]}'   # 401
 ```
+
+(`local` needs `task inference:run`; `ollama` needs Ollama running on your Mac.)
 
 ### MCP tools {#mcp-demo}
 
@@ -487,8 +469,7 @@ All components push to Grafana LGTM (`grafana.lab:3000`, default credentials `ad
 | `rest-destinations` | ✓ | ✓ OTLP + stdout | ✓ |
 | `rest-book-flights` | ✓ | ✓ OTLP + stdout | ✓ |
 | Travel desk agents (×5) and the MCP adapters | ✓ | ✓ OTLP + stdout | ✓ |
-| LiteLLM | ✗ (Prometheus metrics on `/metrics`) | stdout | ✗ |
-| agentgateway | ✗ | stdout | ✗ |
+| agentgateway (incl. every LLM call, with `gen_ai.*` attributes) | ✗ | stdout | ✗ |
 
 The agents are instrumented with Starlette, httpx and Pydantic AI (`Agent.instrument_all()`), and trace context travels across every A2A hop through agentgateway. A trip's research shows up in Tempo as one tree: coordinator → scout → MCP tool → REST API, with the LLM calls inside each agent. The approval is a separate trace (it starts when a human decides), and the DBOS workflow steps are in the audit log rather than in the trace.
 
@@ -499,13 +480,13 @@ The agents are instrumented with Starlette, httpx and Pydantic AI (`Agent.instru
 | Feature | This lab (OSS) | Kong AI Lab | Notes |
 |---|---|---|---|
 | HTTP routing | Traefik OSS | Kong API GW | Both cover the basics; Kong has a plugin ecosystem |
-| LLM gateway | LiteLLM (5 aliases incl. a local model, key auth) | Kong LLM GW | LiteLLM: multi-provider, aliases. Kong adds: semantic routing, semantic cache, guardrails, RAG, token budgets, per-consumer rate limits |
+| LLM gateway | agentgateway (OpenAI, Gemini, Ollama, local vLLM; client key, prompt guards, request limits) | Kong LLM GW | agentgateway: route per model, guardrails, provider keys held at the gateway. Kong adds: semantic routing, semantic cache, RAG injection, token budgets, per-consumer rate limits |
 | MCP | agentgateway (open, no auth) | Kong MCP GW | agentgateway routes MCP natively; Kong adds OAuth2 scope ACL, key-auth ACL, token exchange |
-| Agent framework | Pydantic AI (Python, MIT) | TypeScript agents | Different runtimes. Pydantic AI is model-agnostic and runs against LiteLLM here |
+| Agent framework | Pydantic AI (Python, MIT) | TypeScript agents | Different runtimes. Pydantic AI is model-agnostic and runs against the gateway's LLM routes here |
 | A2A agents | FastA2A servers, routed by agentgateway | A2A routed through Kong | Both speak the open A2A protocol |
 | Long-running agents | DBOS workflows on Postgres | n/a | Durable approvals, fare watching, restart-safe |
 | Auth enforcement | Keycloak signs people in to the travel desk (OIDC, roles, no self-approval); gateway routes (MCP, A2A, LLM) are still unauthenticated | Keycloak + OIDC on every route | Gap: Kong enforces auth at the gateway layer; here it is enforced by the application, only for the desk's REST API |
-| Observability | REST servers, MCP adapters and the agents all OTEL-wired (traces+logs+metrics); LiteLLM/agentgateway logs-only | All components fully wired (OTEL traces + logs + metrics) | LiteLLM/agentgateway still a gap |
+| Observability | REST servers, MCP adapters and the agents all OTEL-wired (traces+logs+metrics); agentgateway logs-only | All components fully wired (OTEL traces + logs + metrics) | agentgateway still a gap |
 | LLM Analytics | Full pipeline (Kafka → Postgres → React) | Same | Parity |
 | MCP adapters | Python FastMCP (explicit adapter per API) | Kong ai-mcp-proxy (auto-converts REST) | Kong approach is zero-code |
 | Event/Kafka | Direct Kafka exposure | Kong Event Gateway (protocol proxy + auth) | Kong adds a managed broker layer |
@@ -521,6 +502,6 @@ The agents are instrumented with Starlette, httpx and Pydantic AI (`Agent.instru
 - An agent keeps its MCP session open, so if an MCP server pod is replaced, restart the agents that use it (`kubectl rollout restart deploy -n travel-desk`) or their tool calls return 404.
 - The coordinator and fare-watcher each run a single replica (Recreate strategy): one workflow engine per database.
 - Fares are simulated. With `FARE_TICK_SECONDS` they random-walk deterministically; a real fare feed would replace `rest-flights`.
-- LiteLLM has no OTEL export: it exposes a `/metrics` Prometheus endpoint but doesn't push to LGTM.
+- agentgateway has no OTEL export in this lab: its logs (including every LLM call's `gen_ai.*` attributes) are on stdout, not in Tempo or Loki.
 - No Insomnia collection files for MCP demo flows.
-- LLM Analytics pipeline was designed around the `kafka-log` plugin output format; using it with LiteLLM requires a compatible log middleware.
+- The LLM Analytics pipeline has no producer in this lab: it expects Kong's `kafka-log` format, and agentgateway does not write to Kafka.
